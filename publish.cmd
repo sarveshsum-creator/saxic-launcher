@@ -31,5 +31,9 @@ if errorlevel 1 (
 
 echo.
 echo Pushed. GitHub is rebuilding SAXIC-Launcher.exe now (about 1-2 minutes).
-echo Download: https://github.com/srxvesh11/saxic-launcher/releases/latest/download/SAXIC-Launcher.exe
+set "GH=C:\Program Files\GitHub CLI\gh.exe"
+if exist "%GH%" (
+  for /f "delims=" %%u in ('"%GH%" api user --jq .login 2^>nul') do echo Download: https://github.com/%%u/saxic-launcher/releases/latest
+  echo Open the releases page and refresh it to see the new build.
+)
 pause

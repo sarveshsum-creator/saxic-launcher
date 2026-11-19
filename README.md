@@ -10,7 +10,7 @@ code and no borrowed assets.
 
 ## Download
 
-**[Download SAXIC-Launcher.exe](https://github.com/srxvesh11/saxic-launcher/releases/latest/download/SAXIC-Launcher.exe)**
+**[Download SAXIC-Launcher.exe](../../releases/latest/download/SAXIC-Launcher.exe)**
 
 One file, no installer, no Python needed. The link always serves the newest
 build, because every change pushed to this repository is rebuilt automatically
@@ -142,6 +142,7 @@ python saxic_guitest.py --play             # also install, launch and verify
 - `SAXIC Launcher.bat` — Windows entry point
 - `build_exe.py` — builds the standalone `SAXIC-Launcher.exe`
 - `publish.cmd` — commits + pushes so GitHub rebuilds the public download
+- `setup-github.cmd` — one-time: signs in to GitHub and creates the repo
 
 ## Honest limits (v1)
 
