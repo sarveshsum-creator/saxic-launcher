@@ -1,0 +1,43 @@
+name: Build and publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: Build SAXIC-Launcher.exe
+        run: python build_exe.py
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/SAXIC-Launcher.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  SAXIC-Launcher.exe" | Out-File -Encoding ascii dist/SAXIC-Launcher.exe.sha256
+          Get-Content dist/SAXIC-Launcher.exe.sha256
+
+      - name: Publish to the "latest" release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view latest 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create latest --title "SAXIC Launcher (latest)" --notes "Automatic build of the current source. Download SAXIC-Launcher.exe below." --latest
+          }
+          gh release upload latest dist/SAXIC-Launcher.exe dist/SAXIC-Launcher.exe.sha256 --clobber
