@@ -113,6 +113,7 @@ def project_versions(slug: str, game_version: str = "") -> list:
             })
         out.append({
             "id": v.get("id"),
+            "project_id": v.get("project_id") or "",
             "name": v.get("name") or v.get("version_number"),
             "version_number": v.get("version_number") or "",
             "version_type": v.get("version_type") or "release",
@@ -149,7 +150,7 @@ def featured_mods(game_version: str = "", limit: int = 60) -> list:
         except Exception:  # noqa: BLE001
             continue
         out.append({
-            "project_id": info.get("project_id") or v.get("project_id"),
+            "project_id": info.get("project_id") or v.get("project_id") or "",
             "slug": slug,
             "title": info.get("title") or v.get("name") or slug,
             "description": info.get("description") or "",
@@ -342,9 +343,9 @@ def install_mod(game_dir: str, version: dict, project: dict,
 
     data = _read_manifest(game_dir)
     # one build per project: drop older files from the same mod
-    project_id = project.get("project_id") or version.get("project_id")
+    project_id = project.get("project_id") or version.get("project_id") or ""
     for old, entry in list(data.items()):
-        if old != filename and entry.get("project_id") == project_id:
+        if old != filename and entry.get("project_id") == project_id and project_id:
             _delete_file(root, old)
             data.pop(old, None)
 
