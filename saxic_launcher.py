@@ -861,8 +861,12 @@ class ModLibraryDialog:
 
     def _search_worker(self, query, sort):
         try:
-            hits, total = mods.search(query, self.target, limit=30, sort=sort)
-            self.events.put(("search", (hits, total)))
+            if sort == "featured":
+                hits = mods.featured_mods(self.target, limit=70)
+                self.events.put(("search", (hits, len(hits))))
+            else:
+                hits, total = mods.search(query, self.target, limit=30, sort=sort)
+                self.events.put(("search", (hits, total)))
         except Exception as exc:  # noqa: BLE001
             self.events.put(("error", "search failed: %s" % exc))
 
@@ -876,6 +880,18 @@ class ModLibraryDialog:
         if hits:
             self.results.selection_set("0")
             self.results.focus("0")
+        if hits and hits[0].get("_version"):
+            # curated "featured" rows: every hit already carries its working build
+            self.versions = [h["_version"] for h in hits if h.get("_version")]
+            labels = ["%s  ·  %s" % (v.get("version_number") or "", v.get("version_type") or "")
+                      for v in self.versions]
+            self.version_box.configure(values=labels, state="readonly")
+            pick = mods.pick_version(self.versions, prefer_release=True)
+            idx = self.versions.index(pick) if pick in self.versions else 0
+            self.version_box.current(idx)
+            self.install_btn.configure(text="Install mod", state="normal")
+            self.status.configure(text="%d featured mod(s) for %s" % (len(self.versions), self.target))
+            return
         self.status.configure(text="%d mods found" % total)
 
     def _on_hit(self, _event=None):
@@ -893,6 +909,15 @@ class ModLibraryDialog:
         self.detail_desc.configure(text=p["description"] or "")
         self.versions = []
         self.version_var.set("")
+        if p.get("_version"):
+            self.versions = [p["_version"]]
+            labels = ["%s  ·  %s" % (p["_version"].get("version_number") or "",
+                                     p["_version"].get("version_type") or "")]
+            self.version_box.configure(values=labels, state="readonly")
+            self.version_box.current(0)
+            self.install_btn.configure(text="Install mod", state="normal")
+            self.status.configure(text="install the featured build for %s" % self.target)
+            return
         self.version_box.configure(values=[], state="disabled")
         self.install_btn.configure(text="Loading builds...", state="disabled")
         threading.Thread(target=self._versions_worker, args=(p["slug"],), daemon=True).start()
@@ -951,7 +976,7 @@ class ModLibraryDialog:
                 fast=True)
 
             self.events.put(("status", "downloading %s..." % project["title"]))
-            entry = mods.install_mod(game_dir, version, project)
+            entry = mods.install_mod(game_dir, version, project, install_deps=True)
 
             profiles = dict(app.settings.get("mod_profiles") or {})
             profiles[self.target] = {"loader": loader, "profile": profile_id}

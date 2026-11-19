@@ -147,7 +147,7 @@ def main(argv):
              {"version_type": "release", "files": [{"url": "u", "filename": "r.jar"}]}]
         ) or {}).get("version_type") == "release",
         "search sorts are known": set(mods.SORTS.values()) == {
-            "relevance", "downloads", "newest", "updated"},
+            "featured", "relevance", "downloads", "newest", "updated"},
     }
     for name, ok in mod_checks.items():
         print(("PASS " if ok else "FAIL ") + name)

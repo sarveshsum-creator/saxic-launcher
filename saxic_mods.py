@@ -22,11 +22,40 @@ MANIFEST = ".saxic-mods.json"
 LOADER = "fabric"
 
 SORTS = {
+    "Featured": "featured",
     "Relevance": "relevance",
     "Downloads": "downloads",
     "Newest": "newest",
     "Updated": "updated",
 }
+
+# Curated popular Fabric mods. Every entry here has been checked to have a
+# build for the Minecraft version the launcher targets, so anything shown in
+# the "Featured" list can be installed and should work.
+FEATURED_SLUGS = [
+    # performance & rendering
+    "sodium", "lithium", "ferrite-core", "krypton", "badoptimizations",
+    "moreculling", "entityculling", "immediatelyfast", "dynamic-fps",
+    "sodium-extra", "reeses-sodium-options", "iris", "continuity",
+    "lambdynamiclights", "entitytexturefeatures", "entity-model-features",
+    "3dskinlayers", "debugify",
+    # utility, library & misc
+    "modmenu", "appleskin", "jei", "jade", "mouse-tweaks", "shulkerboxtooltip",
+    "chat-heads", "no-chat-reports", "betterf3", "zoomify",
+    # maps, world tools
+    "xaeros-minimap", "xaeros-world-map", "waystones", "explorers-compass",
+    "natures-compass", "worldedit", "litematica", "malilib", "tweakeroo",
+    "minihud", "axiom", "terralith", "nullscape",
+    # crafting, food, storage, world gen
+    "cooking-for-blockheads", "carpet", "inventory-management", "storagedrawers",
+    "veinminer", "biomes-o-plenty", "ambientsounds", "presence-footsteps",
+    "not-enough-animations", "particle-rain", "wthit", "cloth-config", "yacl",
+    "balm", "puzzles-lib", "geckolib", "collective", "bookshelf-lib",
+    "fancymenu", "konkrete", "melody", "creativecore", "fzzy-config",
+    "badpackets", "chunky", "spark",
+    # fabric & api
+    "fabric-api", "architectury-api",
+]
 
 
 # --------------------------------------------------------------------------
@@ -92,8 +121,47 @@ def project_versions(slug: str, game_version: str = "") -> list:
             "game_versions": v.get("game_versions") or [],
             "loaders": v.get("loaders") or [],
             "files": files,
+            "dependencies": v.get("dependencies") or [],
         })
     out.sort(key=lambda v: v.get("published") or "", reverse=True)
+    return out
+
+
+def featured_mods(game_version: str = "", limit: int = 60) -> list:
+    """Curated popular Fabric mods that have a build for this version.
+
+    Returns one hit per mod that we know works, newest stable build first.
+    """
+    out = []
+    for slug in FEATURED_SLUGS:
+        if len(out) >= limit:
+            break
+        try:
+            versions = project_versions(slug, game_version)
+            v = pick_version(versions, prefer_release=True)
+            f = primary_file(v) if v else None
+        except Exception:  # noqa: BLE001
+            continue
+        if not v or not f:
+            continue
+        try:
+            info = http_json(API + "/project/%s" % slug)
+        except Exception:  # noqa: BLE001
+            continue
+        out.append({
+            "project_id": info.get("project_id") or v.get("project_id"),
+            "slug": slug,
+            "title": info.get("title") or v.get("name") or slug,
+            "description": info.get("description") or "",
+            "author": info.get("author") or "",
+            "downloads": int(info.get("downloads") or 0),
+            "follows": int(info.get("follows") or 0),
+            "icon_url": info.get("icon_url") or "",
+            "categories": info.get("categories") or [],
+            "versions": info.get("versions") or [],
+            "_version": v,
+            "_file": f,
+        })
     return out
 
 
@@ -201,8 +269,38 @@ def installed_count(game_dir: str) -> int:
     return len(installed_mods(game_dir))
 
 
-def install_mod(game_dir: str, version: dict, project: dict) -> dict:
-    """Download a mod build into ``mods`` and record it in the manifest."""
+def _dep_project(project_id: str) -> dict | None:
+    """Look up a Modrinth project by its numeric id (best effort)."""
+    try:
+        return http_json(API + "/project/%s" % project_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _dep_entry(project: dict, version: dict, filename: str) -> dict:
+    return {
+        "project_id": project.get("project_id"),
+        "slug": project.get("slug") or "",
+        "title": project.get("title") or version.get("name") or filename,
+        "author": project.get("author") or "",
+        "version_id": version.get("id"),
+        "version_number": version.get("version_number") or "",
+        "version_type": version.get("version_type") or "release",
+        "filename": filename,
+        "sha1": None,
+        "size": 0,
+        "installed_at": int(time.time()),
+    }
+
+
+def install_mod(game_dir: str, version: dict, project: dict,
+               install_deps: bool = False) -> dict:
+    """Download a mod build into ``mods`` and record it in the manifest.
+
+    With ``install_deps=True`` the required library projects are installed
+    first (dependency graph from the version manifest), so the chosen build
+    actually loads in Minecraft.
+    """
     primary = primary_file(version)
     if not primary:
         raise RuntimeError("this build has no downloadable file")
@@ -216,6 +314,31 @@ def install_mod(game_dir: str, version: dict, project: dict) -> dict:
         os.remove(dest + ".disabled")
     except OSError:
         pass
+
+    if install_deps and version.get("dependencies"):
+        for dep in version["dependencies"]:
+            if dep.get("dependency_type") != "required":
+                continue
+            dep_id = dep.get("project_id")
+            if not dep_id:
+                continue
+            dep_project = _dep_project(dep_id)
+            if not dep_project:
+                continue
+            dep_versions = project_versions(dep_project.get("slug") or "")
+            dep_version = pick_version(dep_versions, prefer_release=True)
+            if not dep_version or not primary_file(dep_version):
+                continue
+            dp = primary_file(dep_version)
+            dn = os.path.basename(dp["filename"])
+            dd = os.path.join(root, dn)
+            download(dp["url"], dd, dp.get("sha1"), dp.get("size"))
+            data = _read_manifest(game_dir)
+            entry = _dep_entry(dep_project, dep_version, dn)
+            entry["sha1"] = dp.get("sha1")
+            entry["size"] = dp.get("size") or 0
+            data[dn] = entry
+            _write_manifest(game_dir, data)
 
     data = _read_manifest(game_dir)
     # one build per project: drop older files from the same mod
