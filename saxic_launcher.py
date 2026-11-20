@@ -27,7 +27,8 @@ try:
     from saxic_build import BUILD_DATE as BUILD_DATE_STAMP
 except Exception:  # source tree without a build stamp
     BUILD_DATE_STAMP = ""
-from saxic_util import Cancelled, app_dir, data_dir, human_size, resource_path
+from saxic_util import (Cancelled, app_dir, data_dir, human_size,
+                        physical_ram_mb, resource_path)
 
 APP_NAME = "SAXIC Launcher"
 APP_VERSION = "1.0"
@@ -50,10 +51,29 @@ GREEN = "#3fb950"
 RED = "#f06060"
 AMBER = "#f5b041"
 
+def recommended_ram_mb(requested: int = 0, mod_count: int = 0) -> int:
+    """A safe heap size in MB for this machine and the installed mod count.
+
+    The JVM needs a few GB even for vanilla; heavy mod sets (worldgen,
+    shaders, rendering mods) crash with native OOM when the heap is too small.
+    The recommended size is roughly half the machine's RAM, grown a bit per
+    installed mod, capped so we never ask for more than ~60% of physical RAM.
+    """
+    total = physical_ram_mb()
+    base = max(2048, min(8192, int(total * 0.5)))
+    per_mod = 64 if mod_count else 0
+    want = base + per_mod * mod_count
+    cap = int(total * 0.6)
+    suggested = max(base, min(want, cap))
+    if requested > 0:
+        return max(requested, suggested)
+    return suggested
+
+
 DEFAULTS = {
     "game_dir": os.path.join(os.environ.get("APPDATA", HERE), ".saxic"),
     "java_path": "",
-    "ram_mb": 2048,
+    "ram_mb": recommended_ram_mb(),
     "workers": 16,
     "client_id": "",
     "show_snapshots": False,
@@ -592,7 +612,14 @@ class App:
             if not then_launch:
                 self.q("status", "%s installed - press PLAY" % vid)
                 return
-            cmd = launch.build_command(prepared, vj, self.account, self.settings, java)
+            ram_now = int(self.settings.get("ram_mb") or 0)
+            ram_use = recommended_ram_mb(ram_now, mods.installed_count(game_dir))
+            if ram_use > ram_now:
+                self.q("log", "memory: using %d MB for %d installed mod(s) - set Memory in Settings to keep it"
+                       % (ram_use, mods.installed_count(game_dir)))
+            run_settings = dict(self.settings)
+            run_settings["ram_mb"] = ram_use
+            cmd = launch.build_command(prepared, vj, self.account, run_settings, java)
             self.q("log", "launch: " + " ".join(cmd))
             self.q("status", "starting Minecraft (%s) ..." % self.account["name"])
             if not self.settings.get("keep_open", True):
@@ -616,11 +643,59 @@ class App:
     def _game_exit(self, code):
         self.game = None
         self.q("playing", False)
-        self.q("status", "Minecraft exited (code %s)" % code)
+        note = self._diagnose_exit(code)
+        self.q("status", "Minecraft exited (code %s)%s" % (code, note))
+        if note:
+            self.q("log", "exit note: %s" % note.strip())
         try:
             self.root.deiconify()
         except tk.TclError:
             pass
+
+    def _diagnose_exit(self, code: int) -> str:
+        """When the game closes itself, look at JVM/game logs for a reason."""
+        if code == 0:
+            return ""
+        game_dir = self.settings.get("game_dir", "")
+        # JVM-level crash (native OOM etc.) leaves an hs_err file next to the game
+        try:
+            names = sorted(
+                (n for n in os.listdir(game_dir) if n.startswith("hs_err_pid") and n.endswith(".log")),
+                key=lambda n: os.path.getmtime(os.path.join(game_dir, n)), reverse=True)
+        except OSError:
+            names = []
+        if names:
+            path = os.path.join(game_dir, names[0])
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    head = fh.read(2000)
+            except OSError:
+                head = ""
+            if "insufficient memory" in head or "Out of Memory" in head:
+                return (" The Java runtime ran out of memory. Raise Memory in Settings "
+                        "(or close other programs) and try again.")
+            return (" The Java runtime crashed (see %s)." % names[0])
+        # Java-level crash reports written by Minecraft itself
+        cr = os.path.join(game_dir, "crash-reports")
+        try:
+            reports = sorted(
+                (n for n in os.listdir(cr) if n.endswith(".txt")),
+                key=lambda n: os.path.getmtime(os.path.join(cr, n)), reverse=True)
+        except OSError:
+            reports = []
+        if reports:
+            path = os.path.join(cr, reports[0])
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read(3000)
+            except OSError:
+                text = ""
+            if "OutOfMemoryError" in text:
+                return (" The game ran out of memory (see crash report %s). "
+                        "Raise Memory in Settings." % reports[0])
+            first = text.splitlines()[0] if text.splitlines() else "crash report"
+            return (" The game crashed (see crash report %s)." % reports[0])
+        return ""
 
 
 class CreditsDialog:
@@ -1095,7 +1170,7 @@ class SettingsDialog:
         vals = {
             "game_dir": tk.StringVar(value=s["game_dir"]),
             "java_path": tk.StringVar(value=s.get("java_path", "")),
-            "ram_mb": tk.StringVar(value=str(s.get("ram_mb", 2048))),
+            "ram_mb": tk.StringVar(value=str(s.get("ram_mb", recommended_ram_mb()))),
             "workers": tk.StringVar(value=str(s.get("workers", 16))),
             "client_id": tk.StringVar(value=s.get("client_id", "")),
             "keep_open": tk.BooleanVar(value=bool(s.get("keep_open", True))),
@@ -1118,28 +1193,31 @@ class SettingsDialog:
         ttk.Label(win, text="Memory (MB)", style="TLabel").grid(row=2, column=0, **pad)
         ttk.Spinbox(win, from_=1024, to=32768, increment=512, textvariable=vals["ram_mb"]).grid(
             row=2, column=1, sticky="w", padx=(0, 14), pady=6)
+        ttk.Label(win, text="Recommended for this PC: %d MB. Too little memory makes the game\n"
+                            "crash during world load." % recommended_ram_mb(),
+                  style="Dim.TLabel", justify="left").grid(row=3, column=1, sticky="w", padx=(0, 14))
 
-        ttk.Label(win, text="Download threads", style="TLabel").grid(row=3, column=0, **pad)
+        ttk.Label(win, text="Download threads", style="TLabel").grid(row=4, column=0, **pad)
         ttk.Spinbox(win, from_=1, to=64, increment=4, textvariable=vals["workers"]).grid(
-            row=3, column=1, sticky="w", padx=(0, 14), pady=6)
+            row=4, column=1, sticky="w", padx=(0, 14), pady=6)
         ttk.Label(win, text="More threads = faster asset download (16 is a good default).",
-                  style="Dim.TLabel", justify="left").grid(row=4, column=1, sticky="w", padx=(0, 14))
+                  style="Dim.TLabel", justify="left").grid(row=5, column=1, sticky="w", padx=(0, 14))
 
-        ttk.Label(win, text="Microsoft client ID", style="TLabel").grid(row=5, column=0, **pad)
+        ttk.Label(win, text="Microsoft client ID", style="TLabel").grid(row=6, column=0, **pad)
         ttk.Entry(win, textvariable=vals["client_id"], width=46).grid(
-            row=5, column=1, sticky="ew", padx=(0, 14), pady=6)
+            row=6, column=1, sticky="ew", padx=(0, 14), pady=6)
         ttk.Label(win, text="Azure app (Mobile & desktop, public client flows = Yes).\n"
                             "Needed only for Microsoft sign-in; a Google login cannot sign into "
                             "Minecraft.", style="Dim.TLabel", justify="left").grid(
-            row=6, column=1, sticky="w", padx=(0, 14))
+            row=7, column=1, sticky="w", padx=(0, 14))
 
         ttk.Checkbutton(win, text="Keep launcher visible while playing",
-                        variable=vals["keep_open"]).grid(row=7, column=1, sticky="w", padx=(0, 14), pady=(8, 0))
+                        variable=vals["keep_open"]).grid(row=8, column=1, sticky="w", padx=(0, 14), pady=(8, 0))
         ttk.Checkbutton(win, text="Show snapshots in the version list",
-                        variable=vals["show_snapshots"]).grid(row=8, column=1, sticky="w", padx=(0, 14))
+                        variable=vals["show_snapshots"]).grid(row=9, column=1, sticky="w", padx=(0, 14))
 
         btns = ttk.Frame(win, style="TFrame")
-        btns.grid(row=9, column=0, columnspan=2, sticky="e", padx=14, pady=16)
+        btns.grid(row=10, column=0, columnspan=2, sticky="e", padx=14, pady=16)
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
         ttk.Button(btns, text="Save", command=lambda: self._save(win, vals)).pack(side="right", padx=(0, 8))
 
@@ -1160,9 +1238,9 @@ class SettingsDialog:
     def _save(self, win, vals):
         app = self.app
         try:
-            ram = max(512, min(32768, int(float(vals["ram_mb"].get())))) if vals["ram_mb"].get() else 2048
+            ram = max(512, min(32768, int(float(vals["ram_mb"].get())))) if vals["ram_mb"].get() else recommended_ram_mb()
         except ValueError:
-            ram = 2048
+            ram = recommended_ram_mb()
         try:
             workers = max(1, min(64, int(float(vals["workers"].get())))) if vals["workers"].get() else 16
         except ValueError:

@@ -104,6 +104,47 @@ def platform_key() -> str:
     return "linux-i386" if a == "x86" else "linux"
 
 
+def physical_ram_mb() -> int:
+    """Total physical RAM in MB (best effort; defaults to 8192 MB on failure)."""
+    try:
+        if os_name() == "windows":
+            import ctypes
+            class _MemStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            status = _MemStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return max(2048, int(status.ullTotalPhys // (1024 * 1024)))
+        elif os_name() == "linux":
+            try:
+                with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.startswith("MemTotal:"):
+                            kb = int(line.split()[1])
+                            return max(2048, kb // 1024)
+            except (OSError, ValueError, IndexError):
+                pass
+        elif os_name() == "osx":
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=10)
+            total = (out.stdout or "").strip()
+            if total.isdigit():
+                return max(2048, int(total) // (1024 * 1024))
+    except Exception:  # noqa: BLE001
+        pass
+    return 8192
+
+
 # --------------------------------------------------------------------------
 # http
 
