@@ -20,6 +20,8 @@ API = "https://api.modrinth.com/v2"
 SITE = "https://modrinth.com/mod/"
 MANIFEST = ".saxic-mods.json"
 LOADER = "fabric"
+MAX_DEP_DEPTH = 8
+
 
 SORTS = {
     "Featured": "featured",
@@ -45,7 +47,7 @@ FEATURED_SLUGS = [
     # maps, world tools
     "xaeros-minimap", "xaeros-world-map", "waystones", "explorers-compass",
     "natures-compass", "worldedit", "litematica", "malilib", "tweakeroo",
-    "minihud", "axiom", "terralith", "nullscape",
+    "minihud", "axiom", "terralith", "terrablender", "nullscape",
     # crafting, food, storage, world gen
     "cooking-for-blockheads", "carpet", "inventory-management", "storagedrawers",
     "veinminer", "biomes-o-plenty", "ambientsounds", "presence-footsteps",
@@ -94,7 +96,11 @@ def search(query: str = "", game_version: str = "", offset: int = 0,
 
 
 def project_versions(slug: str, game_version: str = "") -> list:
-    """Every Fabric build of a mod, newest first."""
+    """Every Fabric build of a mod, newest first.
+
+    When ``game_version`` is given only builds that target that Minecraft
+    version are returned, so "newest" really means "newest for this version".
+    """
     params = {"loaders": json.dumps([LOADER])}
     if game_version:
         params["game_versions"] = json.dumps([game_version])
@@ -126,6 +132,34 @@ def project_versions(slug: str, game_version: str = "") -> list:
         })
     out.sort(key=lambda v: v.get("published") or "", reverse=True)
     return out
+
+
+def primary_file(version: dict) -> dict | None:
+    files = [f for f in (version.get("files") or []) if f.get("url") and f.get("filename")]
+    if not files:
+        return None
+    for f in files:
+        if f.get("primary"):
+            return f
+    return files[0]
+
+
+def pick_version(versions: list, prefer_release: bool = True) -> dict | None:
+    """The build to offer first: newest stable, else newest of any type."""
+    if not versions:
+        return None
+    if prefer_release:
+        for v in versions:
+            if (v.get("version_type") or "") == "release" and primary_file(v):
+                return v
+    for v in versions:
+        if primary_file(v):
+            return v
+    return versions[0]
+
+
+# --------------------------------------------------------------------------
+# featured mods
 
 
 def featured_mods(game_version: str = "", limit: int = 60) -> list:
@@ -164,30 +198,6 @@ def featured_mods(game_version: str = "", limit: int = 60) -> list:
             "_file": f,
         })
     return out
-
-
-def primary_file(version: dict) -> dict | None:
-    files = [f for f in (version.get("files") or []) if f.get("url") and f.get("filename")]
-    if not files:
-        return None
-    for f in files:
-        if f.get("primary"):
-            return f
-    return files[0]
-
-
-def pick_version(versions: list, prefer_release: bool = True) -> dict | None:
-    """The build to offer first: newest stable, else newest of any type."""
-    if not versions:
-        return None
-    if prefer_release:
-        for v in versions:
-            if (v.get("version_type") or "") == "release" and primary_file(v):
-                return v
-    for v in versions:
-        if primary_file(v):
-            return v
-    return versions[0]
 
 
 # --------------------------------------------------------------------------
@@ -280,7 +290,7 @@ def _dep_project(project_id: str) -> dict | None:
 
 def _dep_entry(project: dict, version: dict, filename: str) -> dict:
     return {
-        "project_id": project.get("project_id"),
+        "project_id": project.get("project_id") or version.get("project_id") or "",
         "slug": project.get("slug") or "",
         "title": project.get("title") or version.get("name") or filename,
         "author": project.get("author") or "",
@@ -294,12 +304,52 @@ def _dep_entry(project: dict, version: dict, filename: str) -> dict:
     }
 
 
+def _install_dep_chain(game_dir: str, version: dict, game_version: str,
+                      installed_projects: set, depth: int = 0) -> None:
+    """Recursively install all required dependencies of ``version``."""
+    key = version.get("id") or ""
+    if not key or key in installed_projects or depth > MAX_DEP_DEPTH:
+        return
+    installed_projects.add(key)
+    for dep in version.get("dependencies") or []:
+        if dep.get("dependency_type") != "required":
+            continue
+        dep_id = dep.get("project_id")
+        if not dep_id:
+            continue
+        dep_project = _dep_project(dep_id)
+        if not dep_project:
+            continue
+        dep_versions = project_versions(dep_project.get("slug") or "", game_version)
+        dep_version = pick_version(dep_versions, prefer_release=True)
+        if not dep_version or not primary_file(dep_version):
+            continue
+        dp = primary_file(dep_version)
+        dn = os.path.basename(dp["filename"])
+        dd = os.path.join(mods_dir(game_dir), dn)
+        download(dp["url"], dd, dp.get("sha1"), dp.get("size"))
+        data = _read_manifest(game_dir)
+        # drop older builds of this same project so we never keep two versions
+        dep_pid = dep_project.get("project_id") or ""
+        if dep_pid:
+            for old, oldentry in list(data.items()):
+                if old != dn and oldentry.get("project_id") == dep_pid:
+                    _delete_file(mods_dir(game_dir), old)
+                    data.pop(old, None)
+        entry = _dep_entry(dep_project, dep_version, dn)
+        entry["sha1"] = dp.get("sha1")
+        entry["size"] = dp.get("size") or 0
+        data[dn] = entry
+        _write_manifest(game_dir, data)
+        _install_dep_chain(game_dir, dep_version, game_version, installed_projects, depth + 1)
+
+
 def install_mod(game_dir: str, version: dict, project: dict,
-               install_deps: bool = False) -> dict:
+               install_deps: bool = False, game_version: str = "") -> dict:
     """Download a mod build into ``mods`` and record it in the manifest.
 
     With ``install_deps=True`` the required library projects are installed
-    first (dependency graph from the version manifest), so the chosen build
+    first (transitively, for the given Minecraft version), so the chosen build
     actually loads in Minecraft.
     """
     primary = primary_file(version)
@@ -316,38 +366,17 @@ def install_mod(game_dir: str, version: dict, project: dict,
     except OSError:
         pass
 
-    if install_deps and version.get("dependencies"):
-        for dep in version["dependencies"]:
-            if dep.get("dependency_type") != "required":
-                continue
-            dep_id = dep.get("project_id")
-            if not dep_id:
-                continue
-            dep_project = _dep_project(dep_id)
-            if not dep_project:
-                continue
-            dep_versions = project_versions(dep_project.get("slug") or "")
-            dep_version = pick_version(dep_versions, prefer_release=True)
-            if not dep_version or not primary_file(dep_version):
-                continue
-            dp = primary_file(dep_version)
-            dn = os.path.basename(dp["filename"])
-            dd = os.path.join(root, dn)
-            download(dp["url"], dd, dp.get("sha1"), dp.get("size"))
-            data = _read_manifest(game_dir)
-            entry = _dep_entry(dep_project, dep_version, dn)
-            entry["sha1"] = dp.get("sha1")
-            entry["size"] = dp.get("size") or 0
-            data[dn] = entry
-            _write_manifest(game_dir, data)
+    if install_deps:
+        _install_dep_chain(game_dir, version, game_version, set())
 
     data = _read_manifest(game_dir)
     # one build per project: drop older files from the same mod
     project_id = project.get("project_id") or version.get("project_id") or ""
-    for old, entry in list(data.items()):
-        if old != filename and entry.get("project_id") == project_id and project_id:
-            _delete_file(root, old)
-            data.pop(old, None)
+    if project_id:
+        for old, entry in list(data.items()):
+            if old != filename and entry.get("project_id") == project_id:
+                _delete_file(root, old)
+                data.pop(old, None)
 
     entry = {
         "project_id": project_id,

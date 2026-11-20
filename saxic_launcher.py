@@ -976,7 +976,7 @@ class ModLibraryDialog:
                 fast=True)
 
             self.events.put(("status", "downloading %s..." % project["title"]))
-            entry = mods.install_mod(game_dir, version, project, install_deps=True)
+            entry = mods.install_mod(game_dir, version, project, install_deps=True, game_version=self.target)
 
             profiles = dict(app.settings.get("mod_profiles") or {})
             profiles[self.target] = {"loader": loader, "profile": profile_id}
