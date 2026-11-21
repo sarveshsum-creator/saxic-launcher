@@ -19,6 +19,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -602,3 +603,303 @@ def human_size(num: float) -> str:
             return ("%.0f %s" if unit == "B" else "%.1f %s") % (num, unit)
         num /= 1024.0
     return "%.1f GB" % num
+
+
+# --------------------------------------------------------------------------
+# time formatting
+
+def format_duration(seconds: float) -> str:
+    """Human duration: 45 -> '45s', 3661 -> '1h 1m', 90000 -> '1d 1h'."""
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return "%ds" % seconds
+    minutes = seconds // 60
+    if minutes < 60:
+        return "%dm" % minutes
+    hours = minutes // 60
+    minutes = minutes % 60
+    if hours < 24:
+        return ("%dh %dm" % (hours, minutes)) if minutes else ("%dh" % hours)
+    days = hours // 24
+    hours = hours % 24
+    return ("%dd %dh" % (days, hours)) if hours else ("%dd" % days)
+
+
+def relative_time(timestamp: float) -> str:
+    """'never' / 'just now' / '5 minutes ago' / '3 days ago' for a timestamp."""
+    if not timestamp:
+        return "never"
+    delta = time.time() - float(timestamp)
+    if delta < 45:
+        return "just now"
+    if delta < 90:
+        return "a minute ago"
+    minutes = int(delta // 60)
+    if minutes < 60:
+        return "%d minutes ago" % minutes
+    hours = int(delta // 3600)
+    if hours < 24:
+        return "%d hour%s ago" % (hours, "" if hours == 1 else "s")
+    days = int(delta // 86400)
+    if days < 30:
+        return "%d day%s ago" % (days, "" if days == 1 else "s")
+    months = days // 30
+    return "%d month%s ago" % (months, "" if months == 1 else "s")
+
+
+def dir_size(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def open_path(path: str) -> None:
+    """Open a file or folder in the OS default app / file manager."""
+    if not path:
+        return
+    if os_name() == "windows":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif os_name() == "osx":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+# --------------------------------------------------------------------------
+# worlds (singleplayer saves) and backups
+
+
+def worlds_dir(game_dir: str) -> str:
+    return os.path.join(game_dir, "saves")
+
+
+def backups_dir(game_dir: str) -> str:
+    return os.path.join(game_dir, "backups")
+
+
+def scan_worlds(game_dir: str) -> list:
+    """Singleplayer worlds as dicts: name, path, size, modified, icon, locked."""
+    folder = worlds_dir(game_dir)
+    out = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(folder, name)
+        if not os.path.isdir(path):
+            continue
+        if not os.path.isfile(os.path.join(path, "level.dat")):
+            continue
+        try:
+            mtime = os.path.getmtime(os.path.join(path, "level.dat"))
+        except OSError:
+            mtime = 0
+        icon = os.path.join(path, "icon.png")
+        out.append({
+            "name": name,
+            "path": path,
+            "size": dir_size(path),
+            "modified": mtime,
+            "icon": icon if os.path.isfile(icon) else "",
+        })
+    out.sort(key=lambda w: w["modified"], reverse=True)
+    return out
+
+
+def backup_world(game_dir: str, world_name: str, progress=None) -> str:
+    """Zip a world into <game_dir>/backups and return the archive path."""
+    src = os.path.join(worlds_dir(game_dir), world_name)
+    if not os.path.isdir(src):
+        raise IOError("world not found: %s" % world_name)
+    dest_dir = backups_dir(game_dir)
+    os.makedirs(dest_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", world_name).strip("_") or "world"
+    dest = os.path.join(dest_dir, "%s-%s.zip" % (safe, stamp))
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(src):
+            for fname in files:
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, src)
+                zf.write(full, os.path.join(world_name, rel))
+                if progress:
+                    progress(full)
+    return dest
+
+
+def list_backups(game_dir: str) -> list:
+    folder = backups_dir(game_dir)
+    out = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    for name in names:
+        if name.lower().endswith(".zip"):
+            p = os.path.join(folder, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append({"name": name, "path": p, "size": st.st_size, "modified": st.st_mtime})
+    out.sort(key=lambda b: b["modified"], reverse=True)
+    return out
+
+
+def restore_world(game_dir: str, zip_path: str) -> str:
+    """Restore a world backup without overwriting an existing world.
+
+    Returns the name of the world folder that was created.
+    """
+    target_root = worlds_dir(game_dir)
+    os.makedirs(target_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="saxic-restore-")
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmp)
+        folders = [e for e in os.listdir(tmp) if os.path.isdir(os.path.join(tmp, e))]
+        if not folders:
+            raise IOError("this backup has no world folder inside")
+        top = sorted(folders)[0]
+        dest = os.path.join(target_root, top)
+        n = 1
+        while os.path.exists(dest):
+            dest = os.path.join(target_root, "%s (%d)" % (top, n))
+            n += 1
+        shutil.move(os.path.join(tmp, top), dest)
+        return os.path.basename(dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# screenshots
+
+
+def screenshots_dir(game_dir: str) -> str:
+    return os.path.join(game_dir, "screenshots")
+
+
+def scan_screenshots(game_dir: str) -> list:
+    folder = screenshots_dir(game_dir)
+    out = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    for name in names:
+        if not name.lower().endswith(".png"):
+            continue
+        p = os.path.join(folder, name)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append({"name": name, "path": p, "size": st.st_size, "modified": st.st_mtime})
+    out.sort(key=lambda s: s["modified"], reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------
+# java runtimes
+
+
+def java_version(exe: str) -> str:
+    """The '1.8.0_402' / '21.0.1' string reported by ``java -version``."""
+    try:
+        proc = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    text = (proc.stderr or "") + (proc.stdout or "")
+    m = re.search(r'version "([^"]+)"', text)
+    return m.group(1) if m else ""
+
+
+def list_java_runtimes(game_dir: str = "") -> list:
+    """Every Java runtime we can find, newest-looking first.
+
+    Returns dicts: path, version ('21.0.1' or ''), label.
+    """
+    exes = ("javaw.exe", "java.exe") if os_name() == "windows" else ("java",)
+    found: list = []
+
+    def add(path):
+        if path and os.path.isfile(path):
+            found.append(path)
+
+    for name in ("javaw", "java"):
+        add(shutil.which(name))
+    jh = os.environ.get("JAVA_HOME")
+    if jh:
+        for name in exes:
+            add(os.path.join(jh, "bin", name))
+    bases = []
+    if os_name() == "windows":
+        for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            base = os.environ.get(env)
+            if base and os.path.isdir(base):
+                bases.append(base)
+    if game_dir:
+        # Mojang's runtime layout: <game_dir>/runtime/<component>/<platform>/bin
+        rt = os.path.join(game_dir, "runtime")
+        if os.path.isdir(rt):
+            for comp in sorted(os.listdir(rt)):
+                comp_dir = os.path.join(rt, comp)
+                if not os.path.isdir(comp_dir):
+                    continue
+                for plat in sorted(os.listdir(comp_dir)):
+                    for exe in exes:
+                        add(os.path.join(comp_dir, plat, "bin", exe))
+    vendor_dirs = ("Eclipse Adoptium", "Java", "Microsoft", "Amazon Corretto", "Zulu",
+                   "BellSoft", "Eclipse Foundation", "Semeru", "OpenJDK", "jdk")
+    for base in bases:
+        for vendor in vendor_dirs:
+            d = os.path.join(base, vendor)
+            if not os.path.isdir(d):
+                continue
+            for name in reversed(sorted(os.listdir(d))):
+                for exe in exes:
+                    p = os.path.join(d, name, "bin", exe)
+                    if os.path.isfile(p):
+                        found.append(p)
+                        break
+        # also a flat ".../jdk-21/bin" layout
+        for name in sorted(os.listdir(base), reverse=True):
+            if not name.lower().startswith(("jdk", "jre", "temurin", "zulu", "corretto")):
+                continue
+            for exe in exes:
+                p = os.path.join(base, name, "bin", exe)
+                if os.path.isfile(p):
+                    found.append(p)
+                    break
+
+    seen = set()
+    out = []
+    for path in found:
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        ver = java_version(path)
+        label = (("%s  -  " % ver) if ver else "") + path
+        out.append({"path": path, "version": ver, "label": label})
+
+    def major(item):
+        v = item["version"]
+        if not v:
+            return 0
+        first = v.split(".")[0]
+        if first == "1" and "." in v:  # 1.8.0_x
+            parts = v.split(".")
+            return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        return int(first) if first.isdigit() else 0
+
+    out.sort(key=major, reverse=True)
+    return out
+

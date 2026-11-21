@@ -29,7 +29,9 @@ jobs:
         run: |
           $hash = (Get-FileHash dist/SAXIC-Launcher.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  SAXIC-Launcher.exe" | Out-File -Encoding ascii dist/SAXIC-Launcher.exe.sha256
-          Get-Content dist/SAXIC-Launcher.exe.sha256
+          $zipsum = (Get-FileHash dist/SAXIC-Launcher-win64.zip -Algorithm SHA256).Hash.ToLower()
+          "$zipsum  SAXIC-Launcher-win64.zip" | Out-File -Encoding ascii dist/SAXIC-Launcher-win64.zip.sha256
+          Get-ChildItem dist/*.sha256 | ForEach-Object { Get-Content $_.FullName }
 
       - name: Publish to the "latest" release
         shell: pwsh
@@ -38,6 +40,6 @@ jobs:
         run: |
           gh release view latest 2>$null
           if ($LASTEXITCODE -ne 0) {
-            gh release create latest --title "SAXIC Launcher (latest)" --notes "Automatic build of the current source. Download SAXIC-Launcher.exe below." --latest
+            gh release create latest --title "SAXIC Launcher (latest)" --notes "Automatic build of the current source. Download SAXIC-Launcher.exe, or the share-ready zip, below." --latest
           }
-          gh release upload latest dist/SAXIC-Launcher.exe dist/SAXIC-Launcher.exe.sha256 --clobber
+          gh release upload latest dist/SAXIC-Launcher.exe dist/SAXIC-Launcher.exe.sha256 dist/SAXIC-Launcher-win64.zip dist/SAXIC-Launcher-win64.zip.sha256 --clobber

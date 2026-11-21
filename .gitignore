@@ -7,6 +7,7 @@ saxic_build.py
 # Local state (never publish somebody's settings or caches)
 settings.json
 cache/
+news-cache.json
 .saxic-ready.json
 
 # Python

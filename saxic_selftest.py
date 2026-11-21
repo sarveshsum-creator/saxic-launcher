@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import saxic_install as install
 import saxic_launch as launch
@@ -150,6 +151,39 @@ def main(argv):
             "featured", "relevance", "downloads", "newest", "updated"},
     }
     for name, ok in mod_checks.items():
+        print(("PASS " if ok else "FAIL ") + name)
+        fails += 0 if ok else 1
+
+    print("\n--- worlds, backups and screenshots ---")
+    import saxic_util as util
+
+    world_game = os.path.join(here_self, "worldgame")
+    _shutil.rmtree(world_game, ignore_errors=True)
+    world_path = os.path.join(util.worlds_dir(world_game), "Test World")
+    os.makedirs(world_path, exist_ok=True)
+    open(os.path.join(world_path, "level.dat"), "wb").write(b"level")
+    open(os.path.join(world_path, "region.mca"), "wb").write(b"region")
+    scanned_worlds = util.scan_worlds(world_game)
+    backup_path = util.backup_world(world_game, "Test World")
+    listed_backups = util.list_backups(world_game)
+    restored_name = util.restore_world(world_game, backup_path)
+    restored_ok = os.path.isfile(os.path.join(util.worlds_dir(world_game),
+                                              restored_name, "level.dat"))
+    util.open_path  # referenced here so the import is meaningful for the UI
+    shots_empty = util.scan_screenshots(world_game) == []
+    world_checks = {
+        "world scan finds level.dat": len(scanned_worlds) == 1
+                                      and scanned_worlds[0]["name"] == "Test World",
+        "backup zip is listed": len(listed_backups) == 1,
+        "restore creates a new world": bool(restored_name) and restored_ok,
+        "restoring does not overwrite": restored_name != "Test World",
+        "empty screenshots folder": shots_empty,
+        "duration formatting": util.format_duration(3661) == "1h 1m"
+                               and util.format_duration(45) == "45s",
+        "relative time never": util.relative_time(0) == "never",
+        "relative time recent": util.relative_time(time.time() - 7200).endswith("ago"),
+    }
+    for name, ok in world_checks.items():
         print(("PASS " if ok else "FAIL ") + name)
         fails += 0 if ok else 1
     _shutil.rmtree(here_self, ignore_errors=True)

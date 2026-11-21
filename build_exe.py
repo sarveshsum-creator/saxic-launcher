@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,7 +57,40 @@ def main() -> int:
 
     exe = os.path.join(HERE, "dist", NAME + ".exe")
     print("built: %s (%s)" % (exe, _size(exe)))
+    share = write_share_zip(exe)
+    print("share: %s (%s) - send this zip to friends" % (share, _size(share)))
     return 0
+
+
+def write_share_zip(exe: str) -> str:
+    """Bundle the exe with a plain-text quick start for easy sharing."""
+    dest = os.path.join(HERE, "dist", "SAXIC-Launcher-win64.zip")
+    quick_start = (
+        "SAXIC Launcher 1.0 for Windows\n"
+        "==============================\n\n"
+        "1. Double-click SAXIC-Launcher.exe (inside this zip).\n"
+        "2. Pick a Minecraft version and press PLAY.\n\n"
+        "No installer and no Python are needed. Java for Minecraft is\n"
+        "downloaded automatically the first time you play.\n\n"
+        "The first launch downloads about 0.8 GB of game files to\n"
+        "%APPDATA%\\.saxic and keeps launcher settings in\n"
+        "%APPDATA%\\SAXIC Launcher. You can change the game folder in Settings.\n\n"
+        "Windows SmartScreen may say the app is unrecognised because the exe\n"
+        "is not code-signed. Choose More info, then Run anyway.\n\n"
+        "Created 18 November 2026 by SARVESH.S / srxvesh._.11.\n"
+        "Inspired by clumsydev. Not affiliated with Mojang or Microsoft.\n"
+    )
+    extras = [("README-FIRST.txt", quick_start)]
+    for name in ("README.md", "LICENSE"):
+        path = os.path.join(HERE, name)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                extras.append((name, fh.read()))
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(exe, NAME + ".exe")
+        for name, text in extras:
+            zf.writestr(name, text)
+    return dest
 
 
 def _size(path: str) -> str:

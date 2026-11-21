@@ -12,10 +12,13 @@ code and no borrowed assets.
 
 **[Download SAXIC-Launcher.exe](../../releases/latest/download/SAXIC-Launcher.exe)**
 
-One file, no installer, no Python needed. The link always serves the newest
+**[Download the share-ready zip](../../releases/latest/download/SAXIC-Launcher-win64.zip)** —
+the same `.exe` plus a one-page quick start, README and licence. This is the
+easiest file to send to a friend.
+
+One file, no installer, no Python needed. The links always serve the newest
 build, because every change pushed to this repository is rebuilt automatically
-by GitHub Actions. SHA-256 checksum: `SAXIC-Launcher.exe.sha256` on the same
-release.
+by GitHub Actions. SHA-256 checksums (`*.sha256`) are on the same release.
 
 Windows SmartScreen may show "unrecognised app" because the `.exe` is not
 code-signed. Choose **More info → Run anyway**.
@@ -39,6 +42,11 @@ Building the standalone `.exe` yourself: `python build_exe.py` (needs
 | Java | Detects a system JVM, otherwise installs the matching Mojang runtime (`java-runtime-epsilon`, `java-runtime-gamma`, …) into the game folder. |
 | Launch | Builds the real Java command line from the version JSON (modern `arguments` and legacy `minecraftArguments` both supported), streams the game log into the window, and stops the game on request. |
 | Mods | A **Mod library** window searches [Modrinth](https://modrinth.com) for Fabric mods that match the selected Minecraft version, installs them into `mods/`, and can disable/remove them. Installing a mod automatically sets up Fabric and switches **PLAY** to it. |
+| Worlds | The **Worlds** window lists every singleplayer save with its size and last-played time. Double-click a world (or use *Play world*) to launch straight into it, make a `.zip` backup, restore a backup as a new save, open the folder or delete a world. |
+| Screenshots | The **Screenshots** window shows a thumbnail gallery of everything in `screenshots/`. Click a picture to open it full-size. |
+| News | The **News** window shows the latest stories from Mojang's public launcher feed, with a *Java Edition only* filter and *Read more* links. |
+| Play time | The launcher remembers when you last played each version and how long you have played it in total. |
+| Launch options | Extra **JVM arguments**, extra **game arguments**, a custom **window size**, and a picker for any installed **Java runtime** (or leave it on Auto-detect). |
 | Accounts | **Offline profile** (username only) and **Microsoft sign-in** (device-code flow). |
 
 ## Credits
@@ -78,6 +86,9 @@ always matches the build you are running.
 | Version list cache | `cache/version_manifest_v2.json` — lets the window show the list instantly and only re-download it when Mojang changes it |
 | Game files | `%APPDATA%\.saxic` (change it in Settings) — `versions/`, `libraries/`, `assets/`, `runtime/` |
 | Mods | `%APPDATA%\.saxic\mods` — jars downloaded by the Mod library (jars you drop in yourself are listed too). Disabled mods become `*.jar.disabled`; `.saxic-mods.json` records what installed them |
+| World backups | `%APPDATA%\.saxic\backups` — one `.zip` per backup, made by the Worlds window |
+| Screenshots | `%APPDATA%\.saxic\screenshots` — shown in the Screenshots window |
+| News cache | `%APPDATA%\SAXIC Launcher\news-cache.json` for the `.exe`, or `news-cache.json` next to the source, so the News window opens instantly and still works offline |
 | Fabric profile | `versions/fabric-loader-<loader>-<game>/` — generated from Fabric's official profile JSON, merged with the vanilla version it inherits from |
 | Rough size | ~0.8 GB measured for a modern version: ~474 MB assets, ~121 MB libraries, ~117 MB version files, ~100 MB Java runtime |
 

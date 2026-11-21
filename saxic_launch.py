@@ -80,6 +80,17 @@ def _apply(values, table):
     return out
 
 
+def _split_args(text) -> list:
+    """Split a user-entered argument string, honouring quotes."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return text.split()
+
+
 def build_command(prepared: dict, ver_json: dict, account: dict, settings: dict,
                   java_path: str) -> list:
     args = ver_json.get("arguments")
@@ -100,6 +111,9 @@ def build_command(prepared: dict, ver_json: dict, account: dict, settings: dict,
     if not any(a == "-cp" or a == "-classpath" for a in jvm):
         jvm += ["-cp", "${classpath}"]
 
+    # extra JVM options typed by the user (Settings > Launch options)
+    jvm += _split_args(settings.get("jvm_args", ""))
+
     log_arg, log_path = prepared.get("logging") or (None, None)
     if log_arg and log_path:
         jvm.append(log_arg)
@@ -107,6 +121,17 @@ def build_command(prepared: dict, ver_json: dict, account: dict, settings: dict,
     table = _subst_map(prepared, ver_json, account, settings)
     jvm = _apply(jvm, table)
     game = _apply(game, table)
+
+    # custom game window and extra game arguments
+    try:
+        width = int(settings.get("window_width") or 0)
+        height = int(settings.get("window_height") or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    if width > 0 and height > 0:
+        game += ["--width", str(width), "--height", str(height)]
+    game += _split_args(settings.get("game_args", ""))
+
     if log_arg:
         jvm = [a.replace("${path}", log_path) for a in jvm]
 

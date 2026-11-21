@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -27,8 +29,13 @@ try:
     from saxic_build import BUILD_DATE as BUILD_DATE_STAMP
 except Exception:  # source tree without a build stamp
     BUILD_DATE_STAMP = ""
-from saxic_util import (Cancelled, app_dir, available_ram_mb, data_dir,
-                        human_size, memory_status, physical_ram_mb, resource_path)
+from saxic_util import (Cancelled, app_dir, available_ram_mb, backup_world,
+                        backups_dir, data_dir, dir_size, format_duration,
+                        http_json_cached, human_size, list_backups,
+                        list_java_runtimes, memory_status, open_path,
+                        physical_ram_mb, read_json_cache, relative_time,
+                        resource_path, restore_world, scan_screenshots,
+                        scan_worlds, screenshots_dir, worlds_dir)
 
 APP_NAME = "SAXIC Launcher"
 APP_VERSION = "1.0"
@@ -39,6 +46,8 @@ SETTINGS_PATH = os.path.join(HERE, "settings.json")
 PUBLISHERS = ("SARVESH.S", "srxvesh._.11")
 INSPIRATION = "clumsydev"
 PROJECT_CREATED = "18 November 2026"
+NEWS_URL = "https://launchercontent.mojang.com/v2/news.json"
+NEWS_CACHE = os.path.join(HERE, "news-cache.json")
 
 BG = "#0b0f16"
 PANEL = "#121826"
@@ -98,6 +107,14 @@ DEFAULTS = {
     "last_version": "",
     "offline_name": "Player",
     "mod_profiles": {},
+    # launch options
+    "jvm_args": "",
+    "game_args": "",
+    "window_width": 0,
+    "window_height": 0,
+    # statistics
+    "playtime": {},
+    "last_played": {},
 }
 
 
@@ -177,6 +194,7 @@ class App:
         self.manifest = None
         self.version_cache: dict = {}
         self.entries: list = []
+        self._session = None  # (version_id, start_time) while a game runs
 
         root.title("%s %s" % (APP_NAME, APP_VERSION))
         root.configure(bg=BG)
@@ -243,10 +261,11 @@ class App:
         self.logo.pack(side="left")
         self._draw_logo()
         ttk.Label(top, text=APP_NAME.upper(), style="Head.TLabel").pack(side="left", padx=(10, 0))
-        ttk.Label(top, text="  original launcher - our own code", style="Sub.TLabel").pack(
-            side="left", pady=(6, 0))
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
         ttk.Button(top, text="Credits", command=self.open_credits).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="News", command=self.open_news).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="Screenshots", command=self.open_screenshots).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="Worlds", command=self.open_worlds).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="Mods", command=self.open_mods).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="Open folder", command=self.open_folder).pack(side="right", padx=(0, 8))
 
@@ -311,6 +330,8 @@ class App:
         self.progress.pack(fill="x", pady=(10, 4))
         self.status = ttk.Label(right, text="Ready.", style="Sub.TLabel")
         self.status.pack(anchor="w")
+        self.stats_lbl = ttk.Label(right, text="", style="Sub.TLabel")
+        self.stats_lbl.pack(anchor="w", pady=(2, 0))
 
         logf = ttk.Frame(right, style="TFrame")
         logf.pack(fill="both", expand=True, pady=(10, 0))
@@ -463,12 +484,32 @@ class App:
         v = self._selected_version()
         if not v:
             self.play_btn.configure(text="PLAY")
+            self._update_stats(None)
             return
         prof = (self.settings.get("mod_profiles") or {}).get(v["id"]) or {}
         if prof.get("profile") and mods.installed_count(self.settings["game_dir"]):
             self.play_btn.configure(text="PLAY  %s  ·  Fabric" % v["id"])
         else:
             self.play_btn.configure(text="PLAY  " + v["id"])
+        self._update_stats(v["id"])
+
+    def _update_stats(self, version_id):
+        """Show last-played / total play time for the selected version."""
+        if not version_id:
+            self.stats_lbl.configure(text="")
+            return
+        keys = [version_id]
+        prof = (self.settings.get("mod_profiles") or {}).get(version_id) or {}
+        if prof.get("profile"):
+            keys.append(prof["profile"])
+        played = self.settings.get("playtime") or {}
+        seen = self.settings.get("last_played") or {}
+        spent = sum(float(played.get(k, 0) or 0) for k in keys)
+        last = max([float(seen.get(k, 0) or 0) for k in keys] or [0])
+        parts = ["Last played: " + relative_time(last)]
+        if spent:
+            parts.append("Total: " + format_duration(spent))
+        self.stats_lbl.configure(text="   ·   ".join(parts))
 
     # ----------------------------------------------------------------- act
     def open_folder(self):
@@ -487,6 +528,15 @@ class App:
 
     def open_settings(self):
         SettingsDialog(self).show()
+
+    def open_worlds(self):
+        WorldsDialog(self).show()
+
+    def open_screenshots(self):
+        ScreenshotsDialog(self).show()
+
+    def open_news(self):
+        NewsDialog(self).show()
 
     def log_line(self, text: str):
         self.log.configure(state="normal")
@@ -567,7 +617,14 @@ class App:
             return
         self._start_work(True)
 
-    def _start_work(self, then_launch: bool):
+    def play_world(self, world_name: str):
+        """Start the selected version straight into a singleplayer world."""
+        if self.game or self.busy:
+            messagebox.showinfo(APP_NAME, "A game is already running or being prepared.")
+            return
+        self._start_work(True, world_name)
+
+    def _start_work(self, then_launch: bool, world: str = ""):
         if self.busy:
             return
         sel = self._pick_meta()  # Tk read happens here, on the main thread
@@ -575,9 +632,10 @@ class App:
             return
         self.cancel.clear()
         self.q("busy", True)
-        threading.Thread(target=self._work, args=(then_launch, sel), daemon=True).start()
+        threading.Thread(target=self._work, args=(then_launch, sel, world),
+                         daemon=True).start()
 
-    def _work(self, then_launch: bool, sel: dict):
+    def _work(self, then_launch: bool, sel: dict, world: str = ""):
         try:
             vid = sel["id"]
             game_dir = self.settings["game_dir"]
@@ -646,11 +704,20 @@ class App:
                        % (ram_use, mod_now, ram_now))
             run_settings = dict(self.settings)
             run_settings["ram_mb"] = ram_use
+            if world:
+                quick = '--quickPlaySingleplayer "%s"' % world.replace('"', "")
+                run_settings["game_args"] = ("%s %s" % (run_settings.get("game_args", ""), quick)).strip()
+                self.q("log", "quick play: " + world)
             cmd = launch.build_command(prepared, vj, self.account, run_settings, java)
             self.q("log", "launch: " + " ".join(cmd))
             self.q("status", "starting Minecraft (%s) ..." % self.account["name"])
             if not self.settings.get("keep_open", True):
                 self.q("iconify", True)
+            self._session = (vid, time.time())
+            last = dict(self.settings.get("last_played") or {})
+            last[vid] = self._session[1]
+            self.settings["last_played"] = last
+            save_settings(self.settings)
             self.game = launch.launch_game(cmd, self.settings["game_dir"],
                                            on_line=lambda s: self.q("log", s),
                                            on_exit=lambda c: self.q("exit", c))
@@ -669,6 +736,16 @@ class App:
 
     def _game_exit(self, code):
         self.game = None
+        if self._session:
+            run_id, started = self._session
+            self._session = None
+            elapsed = max(0.0, time.time() - started)
+            if elapsed >= 1:
+                spent = dict(self.settings.get("playtime") or {})
+                spent[run_id] = float(spent.get(run_id, 0)) + elapsed
+                self.settings["playtime"] = spent
+                save_settings(self.settings)
+            self._update_go_text()
         self.q("playing", False)
         note = self._diagnose_exit(code)
         self.q("status", "Minecraft exited (code %s)%s" % (code, note))
@@ -1187,9 +1264,481 @@ def _fmt_count(n) -> str:
     return str(n)
 
 
+class WorldsDialog:
+    """Singleplayer worlds: play, back up, restore, open, delete."""
+
+    def __init__(self, app: App):
+        self.app = app
+        self.win = None
+        self.tree = None
+        self.backup_tree = None
+        self.count_lbl = None
+        self.status = None
+        self.worlds: dict = {}
+        self.backups: dict = {}
+
+    def show(self):
+        app = self.app
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("Worlds")
+        win.configure(bg=BG)
+        win.geometry("820x600")
+        win.minsize(720, 500)
+        win.transient(app.root)
+        win.grab_set()
+        win.focus_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=14, pady=(12, 2))
+        ttk.Label(head, text="WORLDS", style="Head.TLabel").pack(side="left")
+        self.count_lbl = ttk.Label(head, text="", style="Sub.TLabel")
+        self.count_lbl.pack(side="left", padx=(10, 0), pady=(6, 0))
+        ttk.Button(head, text="Game folder",
+                   command=lambda: open_path(app.settings["game_dir"])).pack(side="right")
+        ttk.Button(head, text="Refresh", command=self.refresh).pack(side="right", padx=(0, 8))
+
+        wrap = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        wrap.pack(fill="both", expand=True, padx=14, pady=(8, 0))
+        self.tree = ttk.Treeview(wrap, columns=("world", "size", "when"),
+                                 show="headings", style="Mods.Treeview",
+                                 selectmode="browse")
+        for col, text, width, anchor in (("world", "WORLD", 430, "w"),
+                                         ("size", "SIZE", 90, "e"),
+                                         ("when", "LAST PLAYED", 150, "w")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "world"))
+        tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda _e: self._play())
+
+        actions = ttk.Frame(win, style="TFrame")
+        actions.pack(fill="x", padx=14, pady=(8, 0))
+        ttk.Button(actions, text="Play world", command=self._play).pack(side="left")
+        ttk.Button(actions, text="Back up now", command=self._backup).pack(
+            side="left", padx=(8, 0))
+        ttk.Button(actions, text="Open folder", command=self._open_world).pack(
+            side="left", padx=(8, 0))
+        ttk.Button(actions, text="Delete", command=self._delete).pack(
+            side="left", padx=(8, 0))
+
+        ttk.Label(win, text="BACKUPS", style="Dim.TLabel",
+                  font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=14, pady=(12, 2))
+        bwrap = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        bwrap.pack(fill="x", padx=14)
+        self.backup_tree = ttk.Treeview(bwrap, columns=("file", "size", "when"),
+                                        show="headings", height=5,
+                                        style="Mods.Treeview", selectmode="browse")
+        for col, text, width, anchor in (("file", "BACKUP", 430, "w"),
+                                         ("size", "SIZE", 90, "e"),
+                                         ("when", "CREATED", 150, "w")):
+            self.backup_tree.heading(col, text=text)
+            self.backup_tree.column(col, width=width, anchor=anchor,
+                                    stretch=(col == "file"))
+        bsb = ttk.Scrollbar(bwrap, orient="vertical", command=self.backup_tree.yview)
+        self.backup_tree.configure(yscrollcommand=bsb.set)
+        bsb.pack(side="right", fill="y")
+        self.backup_tree.pack(side="left", fill="x", expand=True)
+
+        bacts = ttk.Frame(win, style="TFrame")
+        bacts.pack(fill="x", padx=14, pady=(8, 0))
+        ttk.Button(bacts, text="Restore selected",
+                   command=self._restore_selected).pack(side="left")
+        ttk.Button(bacts, text="Restore from file...",
+                   command=self._restore_file).pack(side="left", padx=(8, 0))
+        ttk.Button(bacts, text="Backups folder",
+                   command=self._open_backups).pack(side="left", padx=(8, 0))
+
+        self.status = ttk.Label(win, text="", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=14, pady=(8, 10))
+        self.refresh()
+
+    # ------------------------------------------------------------- helpers
+    def refresh(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        game_dir = self.app.settings["game_dir"]
+        self.worlds = {}
+        self.tree.delete(*self.tree.get_children())
+        found = scan_worlds(game_dir)
+        for w in found:
+            self.worlds[w["name"]] = w
+            self.tree.insert("", "end", iid=w["name"],
+                             values=(w["name"], human_size(w["size"]),
+                                     relative_time(w["modified"])))
+        self.count_lbl.configure(text="%d world%s  -  double-click to play" %
+                                      (len(found), "" if len(found) == 1 else "s"))
+        children = self.tree.get_children()
+        if children:
+            self.tree.selection_set(children[0])
+
+        self.backups = {}
+        self.backup_tree.delete(*self.backup_tree.get_children())
+        blist = list_backups(game_dir)
+        for b in blist:
+            self.backups[b["name"]] = b
+            self.backup_tree.insert("", "end", iid=b["name"],
+                                    values=(b["name"], human_size(b["size"]),
+                                            relative_time(b["modified"])))
+        if blist:
+            self.backup_tree.selection_set(blist[0]["name"])
+
+    def _selected_world(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Pick a world first.", parent=self.win)
+            return None
+        return self.worlds.get(sel[0])
+
+    def _run(self, label, func, done=None):
+        """Run a slow world operation without freezing the dialog."""
+        if not self.win or not self.win.winfo_exists():
+            return
+        self.status.configure(text=label + " ...")
+        win = self.win
+        results = queue.Queue()
+
+        def work():
+            try:
+                results.put((func(), ""))
+            except Exception as exc:  # noqa: BLE001
+                results.put((None, str(exc)))
+
+        def poll():
+            try:
+                result, error = results.get_nowait()
+            except queue.Empty:
+                if win.winfo_exists():
+                    win.after(120, poll)
+                return
+            if not win.winfo_exists():
+                return
+            if error:
+                self.status.configure(text="Failed: " + error)
+                messagebox.showerror(APP_NAME, error, parent=win)
+            else:
+                self.status.configure(text=done(result) if done else "Done.")
+                self.refresh()
+
+        threading.Thread(target=work, name="saxic-world-op", daemon=True).start()
+        win.after(120, poll)
+
+    # ------------------------------------------------------------- actions
+    def _play(self):
+        w = self._selected_world()
+        if not w:
+            return
+        if not self.app._selected_version():
+            messagebox.showinfo(APP_NAME, "Pick a Minecraft version in the launcher first.",
+                                parent=self.win)
+            return
+        name = w["name"]
+        self.win.destroy()
+        self.app.play_world(name)
+
+    def _backup(self):
+        w = self._selected_world()
+        if not w:
+            return
+        game_dir = self.app.settings["game_dir"]
+        name = w["name"]
+        self._run("Backing up %s" % name,
+                  lambda: backup_world(game_dir, name),
+                  lambda path: "Saved " + os.path.basename(path))
+
+    def _open_world(self):
+        w = self._selected_world()
+        if w:
+            open_path(w["path"])
+
+    def _delete(self):
+        w = self._selected_world()
+        if not w:
+            return
+        if self.app.game:
+            messagebox.showinfo(APP_NAME, "Close Minecraft before deleting a world.",
+                                parent=self.win)
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                "Delete the world '%s'?\n\nThis deletes %s permanently. Back it up first "
+                "if you are not sure." % (w["name"], w["path"]),
+                parent=self.win):
+            return
+        self._run("Deleting %s" % w["name"],
+                  lambda: shutil.rmtree(w["path"]),
+                  lambda _res: "Deleted " + w["name"])
+
+    def _restore_selected(self):
+        sel = self.backup_tree.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Pick a backup first.", parent=self.win)
+            return
+        self._restore_path(self.backups[sel[0]]["path"])
+
+    def _restore_file(self):
+        path = filedialog.askopenfilename(
+            parent=self.win, title="Choose a world backup",
+            initialdir=backups_dir(self.app.settings["game_dir"]),
+            filetypes=[("World backups", "*.zip"), ("All files", "*.*")])
+        if path:
+            self._restore_path(path)
+
+    def _restore_path(self, path):
+        if not messagebox.askyesno(
+                APP_NAME,
+                "Restore '%s'?\n\nThe world is added as a new save; nothing is overwritten."
+                % os.path.basename(path), parent=self.win):
+            return
+        game_dir = self.app.settings["game_dir"]
+        self._run("Restoring %s" % os.path.basename(path),
+                  lambda: restore_world(game_dir, path),
+                  lambda name: "Restored as " + name)
+
+    def _open_backups(self):
+        folder = backups_dir(self.app.settings["game_dir"])
+        os.makedirs(folder, exist_ok=True)
+        open_path(folder)
+
+
+class ScreenshotsDialog:
+    """A small gallery of screenshots from the game folder."""
+
+    LIMIT = 60
+
+    def __init__(self, app: App):
+        self.app = app
+        self.win = None
+        self.canvas = None
+        self.gallery = None
+        self.count_lbl = None
+        self.images: list = []
+
+    def show(self):
+        app = self.app
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("Screenshots")
+        win.configure(bg=BG)
+        win.geometry("900x640")
+        win.minsize(780, 500)
+        win.transient(app.root)
+        win.grab_set()
+        win.focus_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=14, pady=(12, 2))
+        ttk.Label(head, text="SCREENSHOTS", style="Head.TLabel").pack(side="left")
+        self.count_lbl = ttk.Label(head, text="", style="Sub.TLabel")
+        self.count_lbl.pack(side="left", padx=(10, 0), pady=(6, 0))
+        ttk.Button(head, text="Open folder", command=self._open_folder).pack(side="right")
+        ttk.Button(head, text="Refresh", command=self.refresh).pack(side="right", padx=(0, 8))
+
+        wrap = ttk.Frame(win, style="TFrame")
+        wrap.pack(fill="both", expand=True, padx=14, pady=(8, 14))
+        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.gallery = ttk.Frame(self.canvas, style="TFrame")
+        self.canvas.create_window((0, 0), window=self.gallery, anchor="nw")
+        self.gallery.bind("<Configure>",
+                          lambda _e: self.canvas.configure(
+                              scrollregion=self.canvas.bbox("all")))
+        win.bind("<MouseWheel>",
+                 lambda e: self.canvas.yview_scroll(int(-e.delta / 120), "units"))
+        self.refresh()
+
+    def refresh(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        for child in self.gallery.winfo_children():
+            child.destroy()
+        self.images = []
+        self.canvas.yview_moveto(0)
+        game_dir = self.app.settings["game_dir"]
+        items = scan_screenshots(game_dir)
+        self.count_lbl.configure(text="%d picture%s" %
+                                      (len(items), "" if len(items) == 1 else "s"))
+        if not items:
+            ttk.Label(self.gallery,
+                      text="No screenshots yet.\n\nPress F2 in Minecraft to take one - "
+                           "it will show up here.",
+                      style="Dim.TLabel", justify="left").pack(anchor="w", padx=4, pady=10)
+            return
+        shown = items[:self.LIMIT]
+        for i, shot in enumerate(shown):
+            cell = ttk.Frame(self.gallery, style="TFrame")
+            cell.grid(row=i // 3, column=i % 3, padx=(0, 10), pady=(0, 14), sticky="nw")
+            try:
+                img = tk.PhotoImage(file=shot["path"])
+                factor = max(1, img.width() // 240, img.height() // 150)
+                if factor > 1:
+                    img = img.subsample(factor)
+                self.images.append(img)
+                pic = tk.Label(cell, image=img, bg=PANEL2, bd=0, cursor="hand2")
+                pic.pack()
+                pic.bind("<Button-1>", lambda _e, p=shot["path"]: open_path(p))
+            except tk.TclError:
+                ttk.Label(cell, text="(cannot preview)", style="Dim.TLabel").pack()
+            ttk.Label(cell, text=shot["name"], style="Dim.TLabel",
+                      wraplength=250, justify="left").pack(anchor="w", pady=(4, 0))
+            ttk.Label(cell, text="%s  -  %s" % (human_size(shot["size"]),
+                                                relative_time(shot["modified"])),
+                      style="Dim.TLabel").pack(anchor="w")
+        if len(items) > len(shown):
+            ttk.Label(self.gallery,
+                      text="Showing the latest %d of %d screenshots." % (len(shown), len(items)),
+                      style="Dim.TLabel").grid(row=(len(shown) + 2) // 3, column=0,
+                                               columnspan=3, sticky="w", pady=(0, 10))
+
+    def _open_folder(self):
+        folder = screenshots_dir(self.app.settings["game_dir"])
+        os.makedirs(folder, exist_ok=True)
+        open_path(folder)
+
+
+class NewsDialog:
+    """Latest Minecraft news from Mojang's public launcher feed."""
+
+    def __init__(self, app: App):
+        self.app = app
+        self.win = None
+        self.list_frame = None
+        self.canvas = None
+        self.status = None
+        self.only_java = None
+        self.entries: list = []
+
+    def show(self):
+        app = self.app
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("News")
+        win.configure(bg=BG)
+        win.geometry("820x640")
+        win.minsize(720, 500)
+        win.transient(app.root)
+        win.grab_set()
+        win.focus_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=14, pady=(12, 2))
+        ttk.Label(head, text="NEWS", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  from minecraft.net", style="Sub.TLabel").pack(
+            side="left", pady=(6, 0))
+        ttk.Button(head, text="Open minecraft.net",
+                   command=lambda: webbrowser.open("https://www.minecraft.net/")).pack(side="right")
+        ttk.Button(head, text="Refresh", command=self._load_async).pack(
+            side="right", padx=(0, 8))
+
+        filters = ttk.Frame(win, style="TFrame")
+        filters.pack(fill="x", padx=14, pady=(4, 6))
+        self.only_java = tk.BooleanVar(value=True)
+        ttk.Checkbutton(filters, text="Java Edition only", variable=self.only_java).pack(side="left")
+        self.only_java.trace_add("write", lambda *_a: self._render())
+
+        wrap = ttk.Frame(win, style="TFrame")
+        wrap.pack(fill="both", expand=True, padx=14)
+        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.list_frame = ttk.Frame(self.canvas, style="TFrame")
+        self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
+        self.list_frame.bind("<Configure>",
+                             lambda _e: self.canvas.configure(
+                                 scrollregion=self.canvas.bbox("all")))
+        win.bind("<MouseWheel>",
+                 lambda e: self.canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        self.status = ttk.Label(win, text="Loading news ...", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=14, pady=(8, 10))
+
+        cached = read_json_cache(NEWS_CACHE)
+        if cached and isinstance(cached.get("data"), dict):
+            self.entries = cached["data"].get("entries") or []
+            self._render()
+            self.status.configure(text="Showing the saved copy while refreshing ...")
+        self._load_async()
+
+    def _load_async(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        self.status.configure(text="Loading news ...")
+        win = self.win
+        results = queue.Queue()
+
+        def work():
+            try:
+                data, _state = http_json_cached(NEWS_URL, NEWS_CACHE, timeout=25)
+                results.put((data, ""))
+            except Exception as exc:  # noqa: BLE001
+                results.put((None, str(exc)))
+
+        def poll():
+            try:
+                data, error = results.get_nowait()
+            except queue.Empty:
+                if win.winfo_exists():
+                    win.after(150, poll)
+                return
+            if not win.winfo_exists():
+                return
+            if isinstance(data, dict):
+                self.entries = data.get("entries") or []
+                self._render()
+                self.status.configure(
+                    text="Updated at %s  -  %d stories" %
+                         (datetime.now().strftime("%H:%M"), len(self.entries)))
+            elif error:
+                self.status.configure(text="Could not load news: " + error)
+
+        threading.Thread(target=work, name="saxic-news", daemon=True).start()
+        win.after(150, poll)
+
+    def _render(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        items = [e for e in self.entries if isinstance(e, dict)]
+        if self.only_java.get():
+            items = [e for e in items if "Java" in (e.get("newsType") or [])]
+        items = items[:40]
+        if not items:
+            ttk.Label(self.list_frame, text="No news to show yet.",
+                      style="Dim.TLabel").pack(anchor="w", pady=10)
+            return
+        for entry in items:
+            card = ttk.Frame(self.list_frame, style="Panel.TFrame", padding=12)
+            card.pack(fill="x", pady=(0, 8))
+            ttk.Label(card, text=entry.get("title") or "Untitled",
+                      style="Panel.TLabel", font=("Segoe UI Semibold", 11),
+                      wraplength=650, justify="left").pack(anchor="w")
+            meta = "  -  ".join(x for x in (entry.get("date", ""), entry.get("category", ""))
+                                if x)
+            ttk.Label(card, text=meta, style="PanelDim.TLabel").pack(
+                anchor="w", pady=(2, 4))
+            text = (entry.get("text") or "").strip()
+            if text:
+                ttk.Label(card, text=text, style="PanelDim.TLabel",
+                          wraplength=650, justify="left").pack(anchor="w")
+            link = entry.get("readMoreLink") or ""
+            if link:
+                ttk.Button(card, text="Read more",
+                           command=lambda u=link: webbrowser.open(u)).pack(
+                    anchor="w", pady=(6, 0))
+
+
 class SettingsDialog:
     def __init__(self, app: App):
         self.app = app
+        self._java_choices = {"Auto-detect (recommended)": ""}
 
     def show(self):
         app = self.app
@@ -1197,71 +1746,197 @@ class SettingsDialog:
         win = tk.Toplevel(app.root)
         win.title("Settings")
         win.configure(bg=BG)
-        win.geometry("640x400")
+        win.geometry("740x760")
+        win.minsize(680, 520)
         win.transient(app.root)
         win.grab_set()
+        win.focus_set()
 
         vals = {
             "game_dir": tk.StringVar(value=s["game_dir"]),
             "java_path": tk.StringVar(value=s.get("java_path", "")),
+            "java_pick": tk.StringVar(value="Auto-detect (recommended)"),
             "ram_mb": tk.StringVar(value=str(s.get("ram_mb", recommended_ram_mb()))),
             "workers": tk.StringVar(value=str(s.get("workers", 16))),
             "client_id": tk.StringVar(value=s.get("client_id", "")),
             "keep_open": tk.BooleanVar(value=bool(s.get("keep_open", True))),
             "show_snapshots": tk.BooleanVar(value=bool(s.get("show_snapshots", False))),
+            "jvm_args": tk.StringVar(value=s.get("jvm_args", "")),
+            "game_args": tk.StringVar(value=s.get("game_args", "")),
+            "window_width": tk.StringVar(value=str(s.get("window_width", 0) or 0)),
+            "window_height": tk.StringVar(value=str(s.get("window_height", 0) or 0)),
         }
-        pad = {"padx": 14, "pady": 6, "sticky": "w"}
 
-        ttk.Label(win, text="Game folder", style="TLabel").grid(row=0, column=0, **pad)
-        row0 = ttk.Frame(win, style="TFrame")
-        row0.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=6)
-        ttk.Entry(row0, textvariable=vals["game_dir"], width=46).pack(side="left", fill="x", expand=True)
-        ttk.Button(row0, text="Browse", command=lambda: self._pick_dir(vals)).pack(side="left", padx=(6, 0))
+        # Scrollable body so every option stays reachable on small screens.
+        outer = ttk.Frame(win, style="TFrame")
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        body = ttk.Frame(canvas, style="TFrame")
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(body_id, width=e.width))
+        body.bind("<Configure>",
+                  lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        win.bind("<MouseWheel>",
+                 lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
 
-        ttk.Label(win, text="Java path (blank = auto)", style="TLabel").grid(row=1, column=0, **pad)
-        row1 = ttk.Frame(win, style="TFrame")
-        row1.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=6)
-        ttk.Entry(row1, textvariable=vals["java_path"], width=46).pack(side="left", fill="x", expand=True)
-        ttk.Button(row1, text="Browse", command=lambda: self._pick_java(vals)).pack(side="left", padx=(6, 0))
+        pad = {"padx": 14, "pady": 5, "sticky": "w"}
+        row = [0]
 
-        ttk.Label(win, text="Memory (MB)", style="TLabel").grid(row=2, column=0, **pad)
-        ttk.Spinbox(win, from_=1024, to=32768, increment=512, textvariable=vals["ram_mb"]).grid(
-            row=2, column=1, sticky="w", padx=(0, 14), pady=6)
+        def next_row():
+            row[0] += 1
+
+        def add_label(text):
+            ttk.Label(body, text=text, style="TLabel").grid(row=row[0], column=0, **pad)
+
+        def add_hint(text):
+            ttk.Label(body, text=text, style="Dim.TLabel", justify="left",
+                      wraplength=470).grid(
+                row=row[0], column=1, sticky="w", padx=(0, 14), pady=(0, 4))
+            next_row()
+
+        def add_section(text):
+            next_row()
+            ttk.Label(body, text=text, style="Dim.TLabel",
+                      font=("Segoe UI Semibold", 8)).grid(
+                row=row[0], column=0, columnspan=2, sticky="w", padx=14, pady=(10, 0))
+            next_row()
+
+        add_label("Game folder")
+        row0 = ttk.Frame(body, style="TFrame")
+        row0.grid(row=row[0], column=1, sticky="ew", padx=(0, 14), pady=6)
+        ttk.Entry(row0, textvariable=vals["game_dir"], width=46).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row0, text="Browse", command=lambda: self._pick_dir(vals)).pack(
+            side="left", padx=(6, 0))
+        next_row()
+
+        add_label("Java path (blank = auto)")
+        row1 = ttk.Frame(body, style="TFrame")
+        row1.grid(row=row[0], column=1, sticky="ew", padx=(0, 14), pady=6)
+        ttk.Entry(row1, textvariable=vals["java_path"], width=46).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row1, text="Browse", command=lambda: self._pick_java(vals)).pack(
+            side="left", padx=(6, 0))
+        next_row()
+
+        add_label("Detected Java")
+        java_box = ttk.Combobox(body, textvariable=vals["java_pick"], state="readonly",
+                                width=58, values=["Auto-detect (recommended)"])
+        java_box.grid(row=row[0], column=1, sticky="w", padx=(0, 14), pady=6)
+        next_row()
+        add_hint("Pick an installed runtime, or leave it on Auto-detect.")
+
+        def choose_java(_event=None):
+            vals["java_path"].set(self._java_choices.get(vals["java_pick"].get(), ""))
+
+        java_box.bind("<<ComboboxSelected>>", choose_java)
+
+        def load_java():
+            try:
+                found = list_java_runtimes(app.settings["game_dir"])
+            except Exception:  # noqa: BLE001 - a broken runtime must not block Settings
+                found = []
+            java_results.put(found)
+
+        def apply_java():
+            try:
+                found = java_results.get_nowait()
+            except queue.Empty:
+                if win.winfo_exists():
+                    win.after(150, apply_java)
+                return
+            if not win.winfo_exists():
+                return
+            for item in found:
+                self._java_choices.setdefault(item["label"], item["path"])
+            java_box.configure(values=list(self._java_choices))
+            current = vals["java_path"].get().strip()
+            if current:
+                for label, path in self._java_choices.items():
+                    if path and os.path.normcase(path) == os.path.normcase(current):
+                        vals["java_pick"].set(label)
+                        break
+
+        java_results = queue.Queue()
+        threading.Thread(target=load_java, name="saxic-java-scan", daemon=True).start()
+        win.after(150, apply_java)
+
+        add_label("Memory (MB)")
+        ttk.Spinbox(body, from_=1024, to=32768, increment=512,
+                    textvariable=vals["ram_mb"]).grid(
+            row=row[0], column=1, sticky="w", padx=(0, 14), pady=6)
+        next_row()
         mem = memory_status()
-        mem_hint = ("Recommended for this PC: %d MB. Too little memory can crash the game\n"
+        mem_hint = ("Recommended for this PC: %d MB. Too little memory can crash the game "
                     "while a world loads." % recommended_ram_mb())
         if mem.get("pagefile_mb", 0) < 1024:
-            mem_hint += ("\nThis PC has virtual memory (a pagefile) turned off, so very large\n"
-                         "modpacks may still run out of memory. Enable System managed virtual\n"
+            mem_hint += (" This PC has virtual memory (a pagefile) turned off, so very large "
+                         "modpacks may still run out of memory. Enable System managed virtual "
                          "memory in System Properties > Advanced > Performance > Advanced.")
-        ttk.Label(win, text=mem_hint,
-                  style="Dim.TLabel", justify="left").grid(row=3, column=1, sticky="w", padx=(0, 14))
+        add_hint(mem_hint)
 
-        ttk.Label(win, text="Download threads", style="TLabel").grid(row=4, column=0, **pad)
-        ttk.Spinbox(win, from_=1, to=64, increment=4, textvariable=vals["workers"]).grid(
-            row=4, column=1, sticky="w", padx=(0, 14), pady=6)
-        ttk.Label(win, text="More threads = faster asset download (16 is a good default).",
-                  style="Dim.TLabel", justify="left").grid(row=5, column=1, sticky="w", padx=(0, 14))
+        add_label("Download threads")
+        ttk.Spinbox(body, from_=1, to=64, increment=4,
+                    textvariable=vals["workers"]).grid(
+            row=row[0], column=1, sticky="w", padx=(0, 14), pady=6)
+        next_row()
+        add_hint("More threads = faster asset download (16 is a good default).")
 
-        ttk.Label(win, text="Microsoft client ID", style="TLabel").grid(row=6, column=0, **pad)
-        ttk.Entry(win, textvariable=vals["client_id"], width=46).grid(
-            row=6, column=1, sticky="ew", padx=(0, 14), pady=6)
-        ttk.Label(win, text="Azure app (Mobile & desktop, public client flows = Yes).\n"
-                            "Needed only for Microsoft sign-in; a Google login cannot sign into "
-                            "Minecraft.", style="Dim.TLabel", justify="left").grid(
-            row=7, column=1, sticky="w", padx=(0, 14))
+        add_label("Microsoft client ID")
+        ttk.Entry(body, textvariable=vals["client_id"], width=46).grid(
+            row=row[0], column=1, sticky="ew", padx=(0, 14), pady=6)
+        next_row()
+        add_hint("Azure app (Mobile & desktop, public client flows = Yes). Needed only for "
+                 "Microsoft sign-in; a Google login cannot sign into Minecraft.")
 
-        ttk.Checkbutton(win, text="Keep launcher visible while playing",
-                        variable=vals["keep_open"]).grid(row=8, column=1, sticky="w", padx=(0, 14), pady=(8, 0))
-        ttk.Checkbutton(win, text="Show snapshots in the version list",
-                        variable=vals["show_snapshots"]).grid(row=9, column=1, sticky="w", padx=(0, 14))
+        add_section("LAUNCH OPTIONS")
+
+        add_label("JVM arguments")
+        ttk.Entry(body, textvariable=vals["jvm_args"], width=46).grid(
+            row=row[0], column=1, sticky="ew", padx=(0, 14), pady=6)
+        next_row()
+        add_hint("Extra flags for Java (examples: -XX:+UseG1GC -Dfile.encoding=UTF-8). "
+                 "Leave blank unless you know what you need.")
+
+        add_label("Game arguments")
+        ttk.Entry(body, textvariable=vals["game_args"], width=46).grid(
+            row=row[0], column=1, sticky="ew", padx=(0, 14), pady=6)
+        next_row()
+        add_hint("Extra flags for Minecraft, for example --fullscreen.")
+
+        add_label("Window size")
+        wrow = ttk.Frame(body, style="TFrame")
+        wrow.grid(row=row[0], column=1, sticky="w", padx=(0, 14), pady=6)
+        ttk.Entry(wrow, textvariable=vals["window_width"], width=7).pack(side="left")
+        ttk.Label(wrow, text=" x ", style="TLabel").pack(side="left")
+        ttk.Entry(wrow, textvariable=vals["window_height"], width=7).pack(side="left")
+        ttk.Label(wrow, text="  px", style="Dim.TLabel").pack(side="left")
+        next_row()
+        add_hint("Width x height in pixels. 0 x 0 lets Minecraft choose the window size.")
+
+        add_section("BEHAVIOUR")
+        ttk.Checkbutton(body, text="Keep launcher visible while playing",
+                        variable=vals["keep_open"]).grid(
+            row=row[0], column=1, sticky="w", padx=(0, 14), pady=(4, 0))
+        next_row()
+        ttk.Checkbutton(body, text="Show snapshots in the version list",
+                        variable=vals["show_snapshots"]).grid(
+            row=row[0], column=1, sticky="w", padx=(0, 14))
+        next_row()
+
+        body.columnconfigure(1, weight=1)
 
         btns = ttk.Frame(win, style="TFrame")
-        btns.grid(row=10, column=0, columnspan=2, sticky="e", padx=14, pady=16)
+        btns.pack(fill="x", padx=14, pady=12)
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
-        ttk.Button(btns, text="Save", command=lambda: self._save(win, vals)).pack(side="right", padx=(0, 8))
+        ttk.Button(btns, text="Save", command=lambda: self._save(win, vals)).pack(
+            side="right", padx=(0, 8))
 
-        win.columnconfigure(1, weight=1)
         win.wait_window()
 
     def _pick_dir(self, vals):
@@ -1285,6 +1960,13 @@ class SettingsDialog:
             workers = max(1, min(64, int(float(vals["workers"].get())))) if vals["workers"].get() else 16
         except ValueError:
             workers = 16
+
+        def pixels(var, default=0):
+            try:
+                return max(0, min(7680, int(float(var.get() or default))))
+            except ValueError:
+                return default
+
         app.settings.update({
             "game_dir": os.path.expandvars(os.path.expanduser(vals["game_dir"].get().strip())),
             "java_path": vals["java_path"].get().strip(),
@@ -1293,6 +1975,10 @@ class SettingsDialog:
             "client_id": vals["client_id"].get().strip(),
             "keep_open": bool(vals["keep_open"].get()),
             "show_snapshots": bool(vals["show_snapshots"].get()),
+            "jvm_args": vals["jvm_args"].get().strip(),
+            "game_args": vals["game_args"].get().strip(),
+            "window_width": pixels(vals["window_width"]),
+            "window_height": pixels(vals["window_height"]),
         })
         save_settings(app.settings)
         app.snap_var.set(app.settings["show_snapshots"])
@@ -1306,7 +1992,7 @@ def main():
     icon = resource_path("assets", "saxic.ico")
     try:
         if os.path.isfile(icon):
-            root.iconbitmap(icon)
+            root.iconbitmap(default=icon)
     except Exception:  # noqa: BLE001
         pass
     app = App(root)

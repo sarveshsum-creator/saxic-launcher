@@ -42,6 +42,25 @@ def main(argv=None):
     sl.SettingsDialog(app)
     print("settings dlg: constructed")
 
+    if "--dialogs" in argv:
+        print("--- extra dialogs ---")
+        for cls in (sl.WorldsDialog, sl.ScreenshotsDialog, sl.NewsDialog):
+            dlg = cls(app)
+            dlg.show()
+            for _ in range(15):
+                root.update()
+                time.sleep(0.02)
+            wins = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+            print("%-18s: %d window(s)" % (cls.__name__, len(wins)))
+            for w in wins:
+                w.destroy()
+            root.update()
+        root.after(1200, lambda: [w.destroy() for w in root.winfo_children()
+                                  if isinstance(w, tk.Toplevel)])
+        sl.SettingsDialog(app).show()
+        root.update()
+        print("SettingsDialog    : opened and closed")
+
     credits = sl.credits_info()
     print("credits    :", credits["created"], "|", credits["updated"], "|",
           ", ".join(credits["publishers"]), "|", credits["inspiration"])
@@ -82,6 +101,50 @@ def main(argv=None):
         app.q(kind, payload)
     root.update()
     print("pump       : handled all kinds")
+
+    if "--quickplay" in argv:
+        print("--- quick play path ---")
+        import saxic_launch as launch_mod
+        captured = {}
+
+        class FakeGame:
+            def stop(self):
+                pass
+
+            def alive(self):
+                return False
+
+        real_launch = launch_mod.launch_game
+        launch_mod.launch_game = lambda cmd, cwd, on_line=None, on_exit=None: (
+            captured.setdefault("cmd", cmd), FakeGame())[1]
+        app.play_world("New World")
+        deadline = time.time() + 180
+        while time.time() < deadline and (app.busy or not captured.get("cmd")):
+            root.update()
+            time.sleep(0.05)
+        deadline = time.time() + 10
+        while time.time() < deadline and app.busy:
+            root.update()
+            time.sleep(0.02)
+        root.update()
+        launch_mod.launch_game = real_launch
+        cmd = captured.get("cmd") or []
+        try:
+            at = cmd.index("--quickPlaySingleplayer")
+            world = cmd[at + 1]
+        except (ValueError, IndexError):
+            world = ""
+        print("command parts:", len(cmd))
+        print("quick play   :", world or "(missing)")
+        if not world:
+            print("status       :", app.status.cget("text"))
+            print("log tail     :")
+            print(app.log.get("1.0", "end").strip()[-3000:])
+            print("RESULT: QUICK PLAY FAILED")
+            return 1
+        app.q("exit", 0)
+        root.update()
+        print("RESULT: QUICK PLAY PASSED")
 
     if do_install:
         # this is exactly what the PLAY button does, minus starting the game
