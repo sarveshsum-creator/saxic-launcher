@@ -27,8 +27,8 @@ try:
     from saxic_build import BUILD_DATE as BUILD_DATE_STAMP
 except Exception:  # source tree without a build stamp
     BUILD_DATE_STAMP = ""
-from saxic_util import (Cancelled, app_dir, data_dir, human_size,
-                        physical_ram_mb, resource_path)
+from saxic_util import (Cancelled, app_dir, available_ram_mb, data_dir,
+                        human_size, memory_status, physical_ram_mb, resource_path)
 
 APP_NAME = "SAXIC Launcher"
 APP_VERSION = "1.0"
@@ -52,22 +52,39 @@ RED = "#f06060"
 AMBER = "#f5b041"
 
 def recommended_ram_mb(requested: int = 0, mod_count: int = 0) -> int:
-    """A safe heap size in MB for this machine and the installed mod count.
+    """A safe Java heap size (MB) for this machine and the installed mod count.
 
-    The JVM needs a few GB even for vanilla; heavy mod sets (worldgen,
-    shaders, rendering mods) crash with native OOM when the heap is too small.
-    The recommended size is roughly half the machine's RAM, grown a bit per
-    installed mod, capped so we never ask for more than ~60% of physical RAM.
+    Two different crashes matter here:
+
+    * too *small* a heap  -> Java ``OutOfMemoryError`` while a world loads;
+    * too *large* a heap  -> a **native** out-of-memory error (the JVM, the
+      JIT code cache, mod native libraries and direct buffers all live *outside*
+      the Java heap), which shows up in ``hs_err_pid*.log`` as
+      "insufficient memory ... Chunk::new". On Windows the RAM + pagefile commit
+      limit is the wall, so an oversized ``-Xmx`` starves native memory.
+
+    So the heap is capped by the RAM that is *actually free right now*, after
+    reserving space for the JVM/native side (which grows with the mod count) and
+    for the operating system / other apps.
     """
+    mods = max(0, int(mod_count))
     total = physical_ram_mb()
-    base = max(2048, min(8192, int(total * 0.5)))
-    per_mod = 64 if mod_count else 0
-    want = base + per_mod * mod_count
-    cap = int(total * 0.6)
-    suggested = max(base, min(want, cap))
+    avail = available_ram_mb() or int(total * 0.85)
+
+    overall_cap = int(total * 0.60)              # never more than ~60% of RAM
+    native_reserve = 1792 + 40 * mods            # JVM + metaspace + native libs
+    room = max(2048, avail - native_reserve)     # what is really left to commit
+    ceiling = max(2048, min(overall_cap, room))
+
+    base = max(2048, min(7168, int(total * 0.5)))
+    want = base + 48 * mods
+    suggested = max(2048, min(want, ceiling))
+
     if requested > 0:
-        return max(requested, suggested)
-    return suggested
+        # An explicit choice is honored, but never allowed to starve the native
+        # side (that is exactly what produced the hs_err crashes).
+        return int(max(2048, min(requested, ceiling)))
+    return int(suggested)
 
 
 DEFAULTS = {
@@ -613,10 +630,20 @@ class App:
                 self.q("status", "%s installed - press PLAY" % vid)
                 return
             ram_now = int(self.settings.get("ram_mb") or 0)
-            ram_use = recommended_ram_mb(ram_now, mods.installed_count(game_dir))
-            if ram_use > ram_now:
-                self.q("log", "memory: using %d MB for %d installed mod(s) - set Memory in Settings to keep it"
-                       % (ram_use, mods.installed_count(game_dir)))
+            mod_now = mods.installed_count(game_dir)
+            mem = memory_status()
+            if mem.get("pagefile_mb", 0) < 1024 and mod_now >= 25:
+                self.q("log", "warning: this PC has virtual memory (a pagefile) turned off, so "
+                              "Windows can only commit %d MB beyond what is already in use. "
+                              "Big modpacks can crash while a world loads. Turn on System managed "
+                              "virtual memory in System Properties > Advanced > Performance > "
+                              "Advanced, then restart the PC."
+                       % mem.get("commit_free_mb", 0))
+            ram_use = recommended_ram_mb(ram_now, mod_now)
+            if ram_use != ram_now:
+                self.q("log", "memory: %d MB heap for %d mod(s) (requested %d MB) - sized to "
+                              "leave enough RAM for the JVM/native side"
+                       % (ram_use, mod_now, ram_now))
             run_settings = dict(self.settings)
             run_settings["ram_mb"] = ram_use
             cmd = launch.build_command(prepared, vj, self.account, run_settings, java)
@@ -672,8 +699,15 @@ class App:
             except OSError:
                 head = ""
             if "insufficient memory" in head or "Out of Memory" in head:
-                return (" The Java runtime ran out of memory. Raise Memory in Settings "
-                        "(or close other programs) and try again.")
+                mem = memory_status()
+                if mem.get("pagefile_mb", 0) < 1024:
+                    hint = (" Windows reports no pagefile / virtual memory, so the commit "
+                            "limit is only the physical RAM. A large modpack needs more. "
+                            "Turn on a System managed pagefile in System Properties > "
+                            "Advanced > Performance > Advanced, then restart and retry.")
+                else:
+                    hint = (" Lower Memory in Settings or close other programs, then retry.")
+                return " The Java runtime ran out of memory." + hint
             return (" The Java runtime crashed (see %s)." % names[0])
         # Java-level crash reports written by Minecraft itself
         cr = os.path.join(game_dir, "crash-reports")
@@ -1193,8 +1227,14 @@ class SettingsDialog:
         ttk.Label(win, text="Memory (MB)", style="TLabel").grid(row=2, column=0, **pad)
         ttk.Spinbox(win, from_=1024, to=32768, increment=512, textvariable=vals["ram_mb"]).grid(
             row=2, column=1, sticky="w", padx=(0, 14), pady=6)
-        ttk.Label(win, text="Recommended for this PC: %d MB. Too little memory makes the game\n"
-                            "crash during world load." % recommended_ram_mb(),
+        mem = memory_status()
+        mem_hint = ("Recommended for this PC: %d MB. Too little memory can crash the game\n"
+                    "while a world loads." % recommended_ram_mb())
+        if mem.get("pagefile_mb", 0) < 1024:
+            mem_hint += ("\nThis PC has virtual memory (a pagefile) turned off, so very large\n"
+                         "modpacks may still run out of memory. Enable System managed virtual\n"
+                         "memory in System Properties > Advanced > Performance > Advanced.")
+        ttk.Label(win, text=mem_hint,
                   style="Dim.TLabel", justify="left").grid(row=3, column=1, sticky="w", padx=(0, 14))
 
         ttk.Label(win, text="Download threads", style="TLabel").grid(row=4, column=0, **pad)
