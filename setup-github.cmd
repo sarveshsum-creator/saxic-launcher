@@ -13,15 +13,24 @@ echo  SAXIC Launcher - publish to GitHub
 echo ============================================================
 echo.
 echo A browser window will open. Sign in to GitHub (create a free
-echo account if you do not have one), then click Authorize.
+echo account if you do not have one).
+echo.
+echo IMPORTANT - just signing in is NOT enough:
+echo  1. This black window will show a ONE-TIME CODE, like:  ABCD-1234
+echo  2. In the browser, go to:  https://github.com/login/device
+echo  3. Type that code, press Continue, then click "Authorize GitHub CLI".
+echo  4. Come back here - it will only print DONE after you authorize.
 echo.
 
 "%GH%" auth status >nul 2>nul
 if errorlevel 1 (
   "%GH%" auth login --hostname github.com --git-protocol https --web
+  "%GH%" auth status >nul 2>nul
   if errorlevel 1 (
     echo.
-    echo Login did not finish. Run this file again when ready.
+    echo Login did not finish. You probably did not enter the one-time
+    echo code at https://github.com/login/device , or you did not click
+    echo "Authorize GitHub CLI". Run this file again and follow steps 1-4.
     pause
     exit /b 1
   )
