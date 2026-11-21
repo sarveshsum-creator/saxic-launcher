@@ -6,7 +6,7 @@ metadata/file servers, and it ships **no** game files, no third-party launcher
 code and no borrowed assets.
 
 > Not affiliated with Mojang, Microsoft or any other launcher project.
-> "SKLauncher" is not used anywhere in this codebase.
+> "anyother Launcher" is not used anywhere in this codebase.
 
 ## Download
 
