@@ -75,12 +75,25 @@ def recommended_ram_mb(requested: int = 0, mod_count: int = 0) -> int:
     So the heap is capped by the RAM that is *actually free right now*, after
     reserving space for the JVM/native side (which grows with the mod count) and
     for the operating system / other apps.
+
+    When this PC has **no pagefile** (virtual memory turned off), the commit
+    limit is physical RAM only, so the cap is much lower to leave headroom for
+    the native side and avoid "insufficient memory" crashes mid-play.
     """
     mods = max(0, int(mod_count))
     total = physical_ram_mb()
     avail = available_ram_mb() or int(total * 0.85)
 
-    overall_cap = int(total * 0.60)              # never more than ~60% of RAM
+    mem = memory_status()
+    has_pagefile = mem.get("pagefile_mb", 0) >= 1024
+
+    if has_pagefile:
+        overall_cap = int(total * 0.60)              # never more than ~60% of RAM
+    else:
+        # No pagefile: commit limit = physical RAM only. Cap much lower so the
+        # JVM/native side still has commit headroom while a world loads.
+        overall_cap = int(total * 0.40)
+
     native_reserve = 1792 + 40 * mods            # JVM + metaspace + native libs
     room = max(2048, avail - native_reserve)     # what is really left to commit
     ceiling = max(2048, min(overall_cap, room))
@@ -268,6 +281,8 @@ class App:
         ttk.Button(top, text="Worlds", command=self.open_worlds).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="Mods", command=self.open_mods).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="Open folder", command=self.open_folder).pack(side="right", padx=(0, 8))
+        self.realms_btn = ttk.Button(top, text="Realms", command=self.open_realms, state="disabled")
+        self.realms_btn.pack(side="right", padx=(0, 8))
 
         body = ttk.Frame(self.root, style="TFrame")
         body.pack(fill="both", expand=True, padx=18, pady=(4, 14))
@@ -361,10 +376,12 @@ class App:
         if kind == "microsoft":
             self.acct_lbl.configure(text=acct["name"])
             self.acct_sub.configure(text="Microsoft account - online play enabled")
+            self.realms_btn.configure(state="normal")
         else:
             self.acct_lbl.configure(text=acct["name"] + "  (offline)")
             self.acct_sub.configure(text="Singleplayer and LAN worlds. Online servers need "
                                          "a Microsoft account that owns Minecraft.")
+            self.realms_btn.configure(state="disabled")
         self._update_go_text()
 
     def _use_offline(self):
@@ -537,6 +554,13 @@ class App:
 
     def open_news(self):
         NewsDialog(self).show()
+
+    def open_realms(self):
+        if self.account and self.account.get("kind") == "microsoft":
+            RealmsDialog(self).show()
+        else:
+            messagebox.showinfo(APP_NAME, "Sign in with Microsoft first to use Realms.",
+                                parent=self.root)
 
     def log_line(self, text: str):
         self.log.configure(state="normal")
@@ -916,6 +940,12 @@ class ModLibraryDialog:
         self.sort_var = tk.StringVar(value="Relevance")
         ttk.Combobox(srow, textvariable=self.sort_var, values=list(mods.SORTS),
                      width=11, state="readonly").pack(side="left", padx=(8, 0))
+        self.cat_var = tk.StringVar(value="All categories")
+        ttk.Label(srow, text="  Category:", style="Dim.TLabel").pack(
+            side="left", padx=(8, 0))
+        ttk.Combobox(srow, textvariable=self.cat_var,
+                     values=["All categories"] + mods.category_names(),
+                     width=20, state="readonly").pack(side="left", padx=(2, 0))
         ttk.Button(srow, text="Search", command=self._search).pack(side="left", padx=(8, 0))
 
         body = ttk.Frame(win, style="TFrame")
@@ -1048,7 +1078,9 @@ class ModLibraryDialog:
     def _search_worker(self, query, sort):
         try:
             if sort == "featured":
-                hits = mods.featured_mods(self.target, limit=70)
+                cat = self.cat_var.get()
+                category = None if cat == "All categories" else cat
+                hits = mods.featured_mods_by_category(category, self.target, limit=120)
                 self.events.put(("search", (hits, len(hits))))
             else:
                 hits, total = mods.search(query, self.target, limit=30, sort=sort)
@@ -1076,7 +1108,10 @@ class ModLibraryDialog:
             idx = self.versions.index(pick) if pick in self.versions else 0
             self.version_box.current(idx)
             self.install_btn.configure(text="Install mod", state="normal")
-            self.status.configure(text="%d featured mod(s) for %s" % (len(self.versions), self.target))
+            cat = self.cat_var.get()
+            cat_text = (" in " + cat) if cat != "All categories" else ""
+            self.status.configure(text="%d mod(s)%s for %s" %
+                                  (len(self.versions), cat_text, self.target))
             return
         self.status.configure(text="%d mods found" % total)
 
@@ -1733,6 +1768,160 @@ class NewsDialog:
                 ttk.Button(card, text="Read more",
                            command=lambda u=link: webbrowser.open(u)).pack(
                     anchor="w", pady=(6, 0))
+
+
+class RealmsDialog:
+    """Minecraft Realms list for Microsoft-signed-in accounts.
+
+    Shows realms the account owns or has been invited to, with their state
+    and a way to join one from inside Minecraft.
+    """
+
+    def __init__(self, app: App):
+        self.app = app
+        self.win = None
+        self.tree = None
+        self.status = None
+
+    def show(self):
+        app = self.app
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("Minecraft Realms")
+        win.configure(bg=BG)
+        win.geometry("760x520")
+        win.minsize(700, 420)
+        win.transient(app.root)
+        win.grab_set()
+        win.focus_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=14, pady=(12, 2))
+        ttk.Label(head, text="REALMS", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  requires Microsoft sign-in", style="Sub.TLabel").pack(
+            side="left", pady=(6, 0))
+        ttk.Button(head, text="Refresh", command=self._load_async).pack(
+            side="right", padx=(0, 8))
+
+        wrap = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        wrap.pack(fill="both", expand=True, padx=14, pady=(8, 0))
+        self.tree = ttk.Treeview(wrap, columns=("name", "state", "owner", "days"),
+                                 show="headings", style="Mods.Treeview",
+                                 selectmode="browse")
+        for col, text, width, anchor in (("name", "REALM", 260, "w"),
+                                          ("state", "STATE", 110, "w"),
+                                          ("owner", "OWNER", 160, "w"),
+                                          ("days", "DAYS LEFT", 90, "e")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor,
+                             stretch=(col == "name"))
+        tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda _e: self._join())
+
+        acts = ttk.Frame(win, style="TFrame")
+        acts.pack(fill="x", padx=14, pady=(8, 0))
+        ttk.Button(acts, text="Join selected", command=self._join).pack(side="left")
+        ttk.Button(acts, text="Copy address",
+                   command=self._copy_address).pack(side="left", padx=(8, 0))
+        ttk.Label(acts, text="Join the realm from Minecraft's Multiplayer → Realms screen.",
+                  style="Dim.TLabel").pack(side="right")
+
+        self.status = ttk.Label(win, text="Loading realms ...", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=14, pady=(8, 10))
+
+        self._load_async()
+
+    def _load_async(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        self.status.configure(text="Loading realms ...")
+        win = self.win
+        results = queue.Queue()
+
+        def work():
+            try:
+                realms = auth.realms_list(self.app.account)
+                results.put((realms, ""))
+            except Exception as exc:  # noqa: BLE001
+                results.put((None, str(exc)))
+
+        def poll():
+            try:
+                realms, error = results.get_nowait()
+            except queue.Empty:
+                if win.winfo_exists():
+                    win.after(150, poll)
+                return
+            if not win.winfo_exists():
+                return
+            if error:
+                self.status.configure(text="Could not load realms: " + error)
+                return
+            self._render(realms or [])
+            self.status.configure(text="%d realm%s" %
+                                  (len(realms), "" if len(realms) == 1 else "s"))
+
+        threading.Thread(target=work, name="saxic-realms", daemon=True).start()
+        win.after(150, poll)
+
+    def _render(self, realms):
+        if not self.win or not self.win.winfo_exists():
+            return
+        self._realms = realms or []
+        self.tree.delete(*self.tree.get_children())
+        for r in self._realms:
+            state = r.get("state", "closed")
+            state_label = {"open": "Open", "closed": "Closed",
+                           "expired": "Expired"}.get(state, state.title())
+            days = r.get("daysRemaining", 0)
+            days_label = str(days) if days > 0 else "—"
+            self.tree.insert("", "end", iid=r.get("id", ""),
+                             values=(r.get("name", "Untitled"), state_label,
+                                     r.get("owner", ""), days_label))
+
+    def _selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Pick a realm first.", parent=self.win)
+            return None
+        for r in self._realms:
+            if r.get("id") == sel[0]:
+                return r
+        return None
+
+    def _join(self):
+        r = self._selected()
+        if not r:
+            return
+        if r.get("expired") or r.get("state") != "open":
+            messagebox.showinfo(APP_NAME,
+                                "This realm is not open for joining right now.",
+                                parent=self.win)
+            return
+        app = self.app
+        acct = app.account
+        msg = ("To join '%s':\n\n"
+               "1. Open Minecraft from this launcher.\n"
+               "2. Go to Multiplayer → Realms.\n"
+               "3. Select '%s' and click Join.\n\n"
+               "Make sure you are signed in with the same Microsoft account "
+               "(%s)." % (r.get("name", "this realm"), r.get("name", "this realm"),
+                          acct.get("name", "your account")))
+        messagebox.showinfo(APP_NAME, msg, parent=self.win)
+
+    def _copy_address(self):
+        r = self._selected()
+        if not r:
+            return
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(r.get("name", ""))
+            self.status.configure(text="Realm name copied to clipboard.")
+        except tk.TclError:
+            pass
 
 
 class SettingsDialog:

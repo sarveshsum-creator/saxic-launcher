@@ -27,6 +27,7 @@ XBL_URL = "https://user.auth.xboxlive.com/user/authenticate"
 XSTS_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
 MC_LOGIN_URL = "https://api.minecraftservices.com/authentication/login_with_xbox"
 MC_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile"
+REALMS_URL = "https://realms.minecraft.net/servers/minecraft"
 SCOPE = "XboxLive.signin offline_access"
 
 
@@ -170,3 +171,34 @@ def check_ownership(account: dict) -> bool:
         return True
     except AuthError:
         return False
+
+
+# --------------------------------------------------------------------------
+# Realms
+
+
+def realms_list(account: dict) -> list:
+    """List Minecraft Realms the signed-in account has access to.
+
+    Requires a Microsoft-signed-in account (``kind == "microsoft"``).
+    Returns a list of realm dicts with id, name, state, owner, motd, etc.
+    """
+    if account.get("kind") != "microsoft":
+        return []
+    data = _get(REALMS_URL, account["access_token"])
+    servers = data.get("servers", []) if isinstance(data, dict) else []
+    out = []
+    for s in servers:
+        out.append({
+            "id": s.get("id", ""),
+            "name": s.get("name", "Untitled Realm"),
+            "state": s.get("state", "closed"),
+            "owner": s.get("owner", ""),
+            "ownerUuid": s.get("ownerUuid", ""),
+            "motd": s.get("motd", ""),
+            "players": s.get("players", []) or [],
+            "expired": bool(s.get("expired", False)),
+            "trial": bool(s.get("trial", False)),
+            "daysRemaining": int(s.get("daysRemaining") or 0),
+        })
+    return out

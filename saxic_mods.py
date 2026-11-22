@@ -31,33 +31,90 @@ SORTS = {
     "Updated": "updated",
 }
 
-# Curated popular Fabric mods. Every entry here has been checked to have a
-# build for the Minecraft version the launcher targets, so anything shown in
-# the "Featured" list can be installed and should work.
-FEATURED_SLUGS = [
-    # performance & rendering
-    "sodium", "lithium", "ferrite-core", "krypton", "badoptimizations",
-    "moreculling", "entityculling", "immediatelyfast", "dynamic-fps",
-    "sodium-extra", "reeses-sodium-options", "iris", "continuity",
-    "lambdynamiclights", "entitytexturefeatures", "entity-model-features",
-    "3dskinlayers", "debugify",
-    # utility, library & misc
-    "modmenu", "appleskin", "jei", "jade", "mouse-tweaks", "shulkerboxtooltip",
-    "chat-heads", "no-chat-reports", "betterf3", "zoomify",
-    # maps, world tools
-    "xaeros-minimap", "xaeros-world-map", "waystones", "explorers-compass",
-    "natures-compass", "worldedit", "litematica", "malilib", "tweakeroo",
-    "minihud", "axiom", "terralith", "terrablender", "nullscape",
-    # crafting, food, storage, world gen
-    "cooking-for-blockheads", "carpet", "inventory-management", "storagedrawers",
-    "veinminer", "biomes-o-plenty", "ambientsounds", "presence-footsteps",
-    "not-enough-animations", "particle-rain", "wthit", "cloth-config", "yacl",
-    "balm", "puzzles-lib", "geckolib", "collective", "bookshelf-lib",
-    "fancymenu", "konkrete", "melody", "creativecore", "fzzy-config",
-    "badpackets", "chunky", "spark",
-    # fabric & api
-    "fabric-api", "architectury-api",
-]
+# Curated Fabric mods organised by category. Every entry here is checked
+# against Modrinth when shown, so only mods with a build for the target
+# Minecraft version appear in the library. Entries that don't exist or have
+# no matching build are simply skipped.
+MOD_CATEGORIES = {
+    "Performance": [
+        "sodium", "lithium", "ferrite-core", "krypton", "badoptimizations",
+        "entityculling", "moreculling", "dynamic-fps", "immediatelyfast",
+        "phosphor", "existential", "embeddedium", "starlight", "oculus",
+        "synthetic-threads", "argon", "entity-distance-fade", "cull-leaves",
+        "parallax-chunks", "distant-horizons", "entity-distance-fade",
+        "fast-furnace", "fast-bench", "fast-workbench", "torch-master",
+        "sleeping-in-cages", "quick-shulker",
+    ],
+    "Visuals & Shaders": [
+        "iris", "continuity", "sodium-extra", "reeses-sodium-options",
+        "lambdynamiclights", "entitytexturefeatures", "entity-model-features",
+        "3dskinlayers", "debugify", "embeddedyouth", "composable-shaders",
+        "starlight", "oculus", "entity-rendering", "kerosin",
+        "entity-culling-fix",
+    ],
+    "Quality of Life": [
+        "modmenu", "appleskin", "jei", "jade", "mouse-tweaks",
+        "shulkerboxtooltip", "chat-heads", "no-chat-reports", "betterf3",
+        "zoomify", "wthit", "cloth-config", "yacl", "balm", "fancymenu",
+        "konkrete", "melody", "tweakeroo", "minihud", "axiom",
+        "not-enough-animations", "particle-rain", "roughly-enough-items",
+        "item-tooltips", "mouse-wheelie", "control-room", "janitor",
+        "keep-inventory", "go-to-bed",
+    ],
+    "Libraries & API": [
+        "fabric-api", "architectury-api", "malilib", "puzzles-lib",
+        "geckolib", "collective", "bookshelf-lib", "creativecore",
+        "fzzy-config", "creativecore",
+    ],
+    "World & Generation": [
+        "terralith", "nullscape", "biomes-o-plenty", "explorers-compass",
+        "natures-compass", "waystones", "xaeros-minimap", "xaeros-world-map",
+        "oh-the-biomes-youll-go", "present", "worldedit",
+    ],
+    "Tools & Building": [
+        "litematica", "chunky", "structure-gel", "building-utilities",
+        "schematica", "print",
+    ],
+    "Storage & Inventory": [
+        "storagedrawers", "inventory-management", "cooking-for-blockheads",
+        "veinminer", "shulkerboxtooltip", "backpacks", "iron-chests",
+        "barrels", "inventory-profiles-next", "item-physics",
+    ],
+    "Magic & Adventure": [
+        "ars-nouveau", "apotheosis", "better-combat", "epic-fight",
+        "alexs-mobs", "nature-aura", "create", "origin",
+        "blood-magic", "dank-null", "ender-chest-inventory",
+    ],
+    "Horror": [
+        "the-zone", "liminal", "creeping-dawn", "the-void", "nightmare",
+        "scare", "horror-mod", "entity-303", "void-darkness", "creeping",
+        "liminal-spaces", "the-backrooms",
+    ],
+    "Food & Farming": [
+        "cooking-for-blockheads", "farmers-delight", "crop-maturity",
+        "animal-troughs", "shear-madness", "milkables", "egg-basket",
+    ],
+}
+
+
+def category_slugs(category: str) -> list:
+    """The curated slug list for a category, or every slug when unknown."""
+    return MOD_CATEGORIES.get(category, [])
+
+
+def all_category_slugs() -> list:
+    """Every curated slug across all categories, de-duplicated."""
+    seen = []
+    for slugs in MOD_CATEGORIES.values():
+        for slug in slugs:
+            if slug not in seen:
+                seen.append(slug)
+    return seen
+
+
+def category_names() -> list:
+    """Every category name, in display order."""
+    return list(MOD_CATEGORIES.keys())
 
 
 # --------------------------------------------------------------------------
@@ -167,8 +224,19 @@ def featured_mods(game_version: str = "", limit: int = 60) -> list:
 
     Returns one hit per mod that we know works, newest stable build first.
     """
+    return featured_mods_by_category("", game_version, limit)
+
+
+def featured_mods_by_category(category: str, game_version: str = "",
+                              limit: int = 60) -> list:
+    """Curated mods for ``category`` that have a build for this version.
+
+    When ``category`` is empty every curated category is used. Returns one
+    hit per mod that we know works, newest stable build first.
+    """
+    slugs = category_slugs(category) if category else all_category_slugs()
     out = []
-    for slug in FEATURED_SLUGS:
+    for slug in slugs:
         if len(out) >= limit:
             break
         try:
