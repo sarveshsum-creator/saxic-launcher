@@ -903,3 +903,74 @@ def list_java_runtimes(game_dir: str = "") -> list:
     out.sort(key=major, reverse=True)
     return out
 
+
+# --------------------------------------------------------------------------
+# low-memory graphics tuning
+
+
+# Keys in Minecraft's options.txt that most affect memory/CPU. Values are the
+# safe ceiling for a small-RAM PC; a lower user setting is never raised.
+LOW_MEMORY_OPTIONS = {
+    "renderDistance": 8,
+    "simulationDistance": 6,
+    "mipmapLevels": 2,
+    "entityShadows": 0,
+    "maxFps": 60,
+}
+
+
+def tune_options_for_memory(game_dir: str, keys: dict | None = None) -> bool:
+    """Clamp heavy graphics options in ``options.txt`` for a low-memory PC.
+
+    Only lowers values that are above the safe ceiling, so a player's own
+    lighter settings are kept. The untouched file is saved as
+    ``options.txt.saxic-backup`` the first time. Returns True when the file
+    was changed.
+
+    This matters on PCs without a pagefile: a 16-chunk render distance and
+    12-chunk simulation distance can push a modded world past the Windows
+    commit limit within a couple of minutes, which is what makes the game
+    close itself.
+    """
+    keys = dict(keys or LOW_MEMORY_OPTIONS)
+    path = os.path.join(game_dir, "options.txt")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return False
+
+    changed = False
+    seen = set()
+    out = []
+    for line in lines:
+        key, sep, value = line.partition(":")
+        if sep and key in keys:
+            seen.add(key)
+            try:
+                current = int(float(value))
+            except ValueError:
+                current = None
+            if current is not None and current > int(keys[key]):
+                line = "%s:%s" % (key, keys[key])
+                changed = True
+        out.append(line)
+    for key, value in keys.items():
+        if key not in seen:
+            out.append("%s:%s" % (key, value))
+            changed = True
+
+    if not changed:
+        return False
+
+    backup = path + ".saxic-backup"
+    try:
+        if not os.path.exists(backup):
+            with open(backup, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+    except OSError:
+        return False
+    return True
+

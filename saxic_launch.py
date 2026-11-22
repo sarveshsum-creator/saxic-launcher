@@ -97,19 +97,47 @@ def build_command(prepared: dict, ver_json: dict, account: dict, settings: dict,
     if args:
         jvm = allowed_args(args.get("jvm"))
         # the version json's default tuning (GC/JIT hints), when present
-        jvm += allowed_args(args.get("default-user-jvm"))
+        default_jvm = allowed_args(args.get("default-user-jvm"))
         game = allowed_args(args.get("game"))
     else:
         jvm = ["-Djava.library.path=${natives_directory}"]
+        default_jvm = []
         game = shlex.split(ver_json.get("minecraftArguments", ""))
+
+    low_memory = bool(settings.get("low_memory"))
+
+    # -XX:+AlwaysPreTouch commits the whole Java heap up front. On a PC with
+    # little commit headroom (no pagefile, shared Intel graphics) that is
+    # exactly what starves native memory and kills the JVM after a few
+    # minutes ("insufficient memory ... Chunk::new" in hs_err_pid*.log).
+    default_jvm = [a for a in default_jvm
+                   if a.strip().lower() != "-xx:+alwayspretouch"]
+    if low_memory:
+        # ZGC keeps large native forwarding tables; G1 is far lighter on RAM.
+        default_jvm = [a for a in default_jvm
+                       if a.strip().lower() not in ("-xx:+usezgc", "-xx:+zgenerational")]
+    jvm += default_jvm
 
     # our own memory settings win over anything baked into the version json
     jvm = [a for a in jvm if not (a.startswith("-Xmx") or a.startswith("-Xms"))]
     ram = int(settings.get("ram_mb") or 2048)
+    initial = min(ram, 512) if low_memory else min(ram, 1024)
     if ram > 0:
-        jvm = ["-Xmx%dm" % ram, "-Xms%dm" % min(ram, 1024)] + jvm
+        jvm = ["-Xmx%dm" % ram, "-Xms%dm" % initial] + jvm
     if not any(a == "-cp" or a == "-classpath" for a in jvm):
         jvm += ["-cp", "${classpath}"]
+
+    if low_memory:
+        # Hard ceilings for the native side so a long play session cannot
+        # slowly eat the Windows commit limit.
+        jvm += [
+            "-XX:+UseG1GC",
+            "-XX:MaxGCPauseMillis=50",
+            "-XX:MaxDirectMemorySize=512m",
+            "-XX:MaxMetaspaceSize=512m",
+            "-XX:ReservedCodeCacheSize=160m",
+            "-XX:-UsePerfData",
+        ]
 
     # extra JVM options typed by the user (Settings > Launch options)
     jvm += _split_args(settings.get("jvm_args", ""))

@@ -77,11 +77,15 @@ def write_share_zip(exe: str) -> str:
         "%APPDATA%\\SAXIC Launcher. You can change the game folder in Settings.\n\n"
         "Windows SmartScreen may say the app is unrecognised because the exe\n"
         "is not code-signed. Choose More info, then Run anyway.\n\n"
+        "IF THE GAME CLOSES AFTER A FEW MINUTES:\n"
+        "  Right-click enable-pagefile.cmd -> Run as administrator, then\n"
+        "  restart the PC. This adds a Windows pagefile so large modpacks\n"
+        "  have enough memory to keep running.\n\n"
         "Created 18 November 2026 by SARVESH.S / srxvesh._.11.\n"
         "Inspired by clumsydev. Not affiliated with Mojang or Microsoft.\n"
     )
     extras = [("README-FIRST.txt", quick_start)]
-    for name in ("README.md", "LICENSE"):
+    for name in ("README.md", "LICENSE", "enable-pagefile.cmd", "enable-pagefile.ps1"):
         path = os.path.join(HERE, name)
         if os.path.isfile(path):
             with open(path, "r", encoding="utf-8", errors="replace") as fh:

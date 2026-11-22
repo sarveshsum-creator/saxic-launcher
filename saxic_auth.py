@@ -27,7 +27,10 @@ XBL_URL = "https://user.auth.xboxlive.com/user/authenticate"
 XSTS_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
 MC_LOGIN_URL = "https://api.minecraftservices.com/authentication/login_with_xbox"
 MC_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile"
-REALMS_URL = "https://realms.minecraft.net/servers/minecraft"
+# Java Realms API. The game authenticates with three cookies, not a bearer
+# token: sid=token:<access_token>:<uuid>, user=<name>, version=<game version>.
+REALMS_URL = "https://pc.realms.minecraft.net/worlds"
+REALMS_JOIN_URL = "https://pc.realms.minecraft.net/worlds/v1/%s/join/pc"
 SCOPE = "XboxLive.signin offline_access"
 
 
@@ -177,7 +180,45 @@ def check_ownership(account: dict) -> bool:
 # Realms
 
 
-def realms_list(account: dict) -> list:
+def _realms_headers(account: dict, game_version: str = "") -> dict:
+    """Cookies used by the vanilla client for pc.realms.minecraft.net."""
+    version = str(game_version or "26.3").strip()
+    bits = version.split(".")
+    release = 2 <= len(bits) <= 3 and all(bit.isdigit() for bit in bits)
+    uuid = str(account.get("uuid") or "").replace("-", "")
+    return {
+        "Cookie": "sid=token:%s:%s; user=%s; version=%s" % (
+            account.get("access_token") or "", uuid,
+            account.get("name") or "", version),
+        "Accept": "application/json",
+        "User-Agent": "SAXICLauncher/1.0",
+        "Is-Prerelease": "false" if release else "true",
+    }
+
+
+def _realms_get(url: str, account: dict, game_version: str = "", timeout=40):
+    req = urllib.request.Request(url, headers=_realms_headers(account, game_version))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        if exc.code == 401:
+            raise AuthError("Realms sign-in expired - sign in with Microsoft again.") from None
+        if exc.code == 403:
+            raise AuthError("Realms refused access (403). Open Minecraft once with this "
+                            "account and accept the Realms terms, or check that the "
+                            "account has an active Realms subscription.") from None
+        if exc.code == 404:
+            raise AuthError("that realm was not found (404).") from None
+        raise AuthError("HTTP %s from Realms: %s" % (exc.code, detail[:300])) from None
+    except urllib.error.URLError as exc:
+        raise AuthError("could not reach Realms: %s" % exc.reason) from None
+    except ValueError:
+        raise AuthError("Realms returned an unexpected response.") from None
+
+
+def realms_list(account: dict, game_version: str = "") -> list:
     """List Minecraft Realms the signed-in account has access to.
 
     Requires a Microsoft-signed-in account (``kind == "microsoft"``).
@@ -185,20 +226,45 @@ def realms_list(account: dict) -> list:
     """
     if account.get("kind") != "microsoft":
         return []
-    data = _get(REALMS_URL, account["access_token"])
+    if not account.get("access_token"):
+        raise AuthError("sign in with Microsoft first.")
+    data = _realms_get(REALMS_URL, account, game_version)
     servers = data.get("servers", []) if isinstance(data, dict) else []
     out = []
     for s in servers:
         out.append({
             "id": s.get("id", ""),
-            "name": s.get("name", "Untitled Realm"),
-            "state": s.get("state", "closed"),
-            "owner": s.get("owner", ""),
-            "ownerUuid": s.get("ownerUuid", ""),
-            "motd": s.get("motd", ""),
+            "name": s.get("name") or "Untitled Realm",
+            "state": str(s.get("state") or "CLOSED").lower(),
+            "owner": s.get("owner") or "",
+            "ownerUuid": s.get("ownerUUID") or s.get("ownerUuid") or "",
+            "motd": s.get("motd") or "",
             "players": s.get("players", []) or [],
             "expired": bool(s.get("expired", False)),
             "trial": bool(s.get("trial", False)),
-            "daysRemaining": int(s.get("daysRemaining") or 0),
+            "daysRemaining": int(s.get("daysLeft") or s.get("daysRemaining") or 0),
+            "maxPlayers": int(s.get("maxPlayers") or 0),
+            "compatible": str(s.get("compatibility") or "COMPATIBLE").upper()
+                          == "COMPATIBLE",
+            "activeVersion": s.get("activeVersion") or "",
         })
     return out
+
+
+def realms_address(account: dict, realm_id, game_version: str = "") -> str:
+    """Ask Mojang for the server address of one realm.
+
+    The vanilla client connects to this address after the Realms API has
+    approved the session. ``--quickPlayMultiplayer`` can use it directly.
+    """
+    if account.get("kind") != "microsoft" or not account.get("access_token"):
+        raise AuthError("sign in with Microsoft first.")
+    realm_id = str(realm_id or "").strip()
+    if not realm_id:
+        raise AuthError("this realm has no id.")
+    data = _realms_get(REALMS_JOIN_URL % urllib.parse.quote(realm_id, safe=""),
+                       account, game_version)
+    address = (data or {}).get("address") if isinstance(data, dict) else ""
+    if not address:
+        raise AuthError("Mojang did not return a join address for this realm.")
+    return str(address)

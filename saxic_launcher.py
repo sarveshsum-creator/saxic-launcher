@@ -35,7 +35,8 @@ from saxic_util import (Cancelled, app_dir, available_ram_mb, backup_world,
                         list_java_runtimes, memory_status, open_path,
                         physical_ram_mb, read_json_cache, relative_time,
                         resource_path, restore_world, scan_screenshots,
-                        scan_worlds, screenshots_dir, worlds_dir)
+                        scan_worlds, screenshots_dir, tune_options_for_memory,
+                        worlds_dir)
 
 APP_NAME = "SAXIC Launcher"
 APP_VERSION = "1.0"
@@ -125,6 +126,8 @@ DEFAULTS = {
     "game_args": "",
     "window_width": 0,
     "window_height": 0,
+    # stability
+    "low_memory": "auto",   # auto | on | off
     # statistics
     "playtime": {},
     "last_played": {},
@@ -646,9 +649,16 @@ class App:
         if self.game or self.busy:
             messagebox.showinfo(APP_NAME, "A game is already running or being prepared.")
             return
-        self._start_work(True, world_name)
+        self._start_work(True, world=world_name)
 
-    def _start_work(self, then_launch: bool, world: str = ""):
+    def play_server(self, address: str):
+        """Start the selected version and join a multiplayer server/realm."""
+        if self.game or self.busy:
+            messagebox.showinfo(APP_NAME, "A game is already running or being prepared.")
+            return
+        self._start_work(True, server=address)
+
+    def _start_work(self, then_launch: bool, world: str = "", server: str = ""):
         if self.busy:
             return
         sel = self._pick_meta()  # Tk read happens here, on the main thread
@@ -656,10 +666,10 @@ class App:
             return
         self.cancel.clear()
         self.q("busy", True)
-        threading.Thread(target=self._work, args=(then_launch, sel, world),
+        threading.Thread(target=self._work, args=(then_launch, sel, world, server),
                          daemon=True).start()
 
-    def _work(self, then_launch: bool, sel: dict, world: str = ""):
+    def _work(self, then_launch: bool, sel: dict, world: str = "", server: str = ""):
         try:
             vid = sel["id"]
             game_dir = self.settings["game_dir"]
@@ -714,12 +724,26 @@ class App:
             ram_now = int(self.settings.get("ram_mb") or 0)
             mod_now = mods.installed_count(game_dir)
             mem = memory_status()
+            low_setting = str(self.settings.get("low_memory") or "auto").lower()
+            low_memory = (low_setting == "on" or
+                          (low_setting == "auto" and
+                           (mem.get("pagefile_mb", 0) < 1024 or
+                            mem.get("commit_free_mb", 99999) < 8000)))
+            if low_memory:
+                tuned = False
+                try:
+                    tuned = tune_options_for_memory(game_dir)
+                except Exception:  # noqa: BLE001 - never block a launch on this
+                    tuned = False
+                self.q("log", "stability mode ON: capped native memory%s" %
+                       (" + lower graphics (render 8 / simulation 6)" if tuned else ""))
             if mem.get("pagefile_mb", 0) < 1024 and mod_now >= 25:
                 self.q("log", "warning: this PC has virtual memory (a pagefile) turned off, so "
                               "Windows can only commit %d MB beyond what is already in use. "
                               "Big modpacks can crash while a world loads. Turn on System managed "
                               "virtual memory in System Properties > Advanced > Performance > "
-                              "Advanced, then restart the PC."
+                              "Advanced, then restart the PC. (Run enable-pagefile.cmd as "
+                              "administrator for a one-click fix.)"
                        % mem.get("commit_free_mb", 0))
             ram_use = recommended_ram_mb(ram_now, mod_now)
             if ram_use != ram_now:
@@ -728,10 +752,16 @@ class App:
                        % (ram_use, mod_now, ram_now))
             run_settings = dict(self.settings)
             run_settings["ram_mb"] = ram_use
+            run_settings["low_memory"] = low_memory
             if world:
                 quick = '--quickPlaySingleplayer "%s"' % world.replace('"', "")
                 run_settings["game_args"] = ("%s %s" % (run_settings.get("game_args", ""), quick)).strip()
                 self.q("log", "quick play: " + world)
+            if server:
+                addr = server.strip().replace('"', "").replace("'", "")
+                quick = '--quickPlayMultiplayer "%s"' % addr
+                run_settings["game_args"] = ("%s %s" % (run_settings.get("game_args", ""), quick)).strip()
+                self.q("log", "joining server: " + addr)
             cmd = launch.build_command(prepared, vj, self.account, run_settings, java)
             self.q("log", "launch: " + " ".join(cmd))
             self.q("status", "starting Minecraft (%s) ..." % self.account["name"])
@@ -795,6 +825,14 @@ class App:
         if names:
             path = os.path.join(game_dir, names[0])
             try:
+                # ignore crash files left over from an older session
+                if time.time() - os.path.getmtime(path) > 600:
+                    names = []
+            except OSError:
+                names = []
+        if names:
+            path = os.path.join(game_dir, names[0])
+            try:
                 with open(path, "r", encoding="utf-8", errors="replace") as fh:
                     head = fh.read(2000)
             except OSError:
@@ -802,12 +840,14 @@ class App:
             if "insufficient memory" in head or "Out of Memory" in head:
                 mem = memory_status()
                 if mem.get("pagefile_mb", 0) < 1024:
-                    hint = (" Windows reports no pagefile / virtual memory, so the commit "
-                            "limit is only the physical RAM. A large modpack needs more. "
-                            "Turn on a System managed pagefile in System Properties > "
-                            "Advanced > Performance > Advanced, then restart and retry.")
+                    hint = (" Windows has no pagefile, so the game can only use about "
+                            "%d MB of commit space in total. Stability mode is on, but a "
+                            "large modpack still needs more. Run enable-pagefile.cmd as "
+                            "administrator (then restart the PC), or install fewer mods."
+                            % mem.get("commit_free_mb", 0))
                 else:
-                    hint = (" Lower Memory in Settings or close other programs, then retry.")
+                    hint = (" Close other programs to free memory, or lower Memory "
+                            "in Settings, then retry.")
                 return " The Java runtime ran out of memory." + hint
             return (" The Java runtime crashed (see %s)." % names[0])
         # Java-level crash reports written by Minecraft itself
@@ -938,14 +978,18 @@ class ModLibraryDialog:
         entry.pack(side="left", fill="x", expand=True)
         entry.bind("<Return>", lambda _e: self._search())
         self.sort_var = tk.StringVar(value="Relevance")
-        ttk.Combobox(srow, textvariable=self.sort_var, values=list(mods.SORTS),
-                     width=11, state="readonly").pack(side="left", padx=(8, 0))
+        sort_box = ttk.Combobox(srow, textvariable=self.sort_var, values=list(mods.SORTS),
+                                width=11, state="readonly")
+        sort_box.pack(side="left", padx=(8, 0))
+        sort_box.bind("<<ComboboxSelected>>", lambda _e: self._search())
         self.cat_var = tk.StringVar(value="All categories")
         ttk.Label(srow, text="  Category:", style="Dim.TLabel").pack(
             side="left", padx=(8, 0))
-        ttk.Combobox(srow, textvariable=self.cat_var,
-                     values=["All categories"] + mods.category_names(),
-                     width=20, state="readonly").pack(side="left", padx=(2, 0))
+        cat_box = ttk.Combobox(srow, textvariable=self.cat_var,
+                               values=["All categories"] + mods.category_names(),
+                               width=20, state="readonly")
+        cat_box.pack(side="left", padx=(2, 0))
+        cat_box.bind("<<ComboboxSelected>>", lambda _e: self._search())
         ttk.Button(srow, text="Search", command=self._search).pack(side="left", padx=(8, 0))
 
         body = ttk.Frame(win, style="TFrame")
@@ -1077,10 +1121,29 @@ class ModLibraryDialog:
 
     def _search_worker(self, query, sort):
         try:
-            if sort == "featured":
-                cat = self.cat_var.get()
-                category = None if cat == "All categories" else cat
+            cat = self.cat_var.get()
+            category = None if cat == "All categories" else cat
+            if sort == "featured" or category:
+                if category is None and query == "":
+                    # "Featured / all categories" would mean checking ~200
+                    # curated mods one by one. Show the most downloaded Fabric
+                    # mods for this version instead, which is one request.
+                    hits, total = mods.search("", self.target, limit=60,
+                                              sort="downloads")
+                    self.events.put(("search", (hits, total)))
+                    return
                 hits = mods.featured_mods_by_category(category, self.target, limit=120)
+                if query:
+                    q = query.lower()
+                    hits = [h for h in hits
+                            if q in (h.get("title") or "").lower()
+                            or q in (h.get("description") or "").lower()
+                            or q in (h.get("slug") or "").lower()]
+                if sort == "downloads":
+                    hits.sort(key=lambda h: h.get("downloads") or 0, reverse=True)
+                elif sort in ("newest", "updated"):
+                    hits.sort(key=lambda h: (h.get("_version") or {}).get("published") or "",
+                              reverse=True)
                 self.events.put(("search", (hits, len(hits))))
             else:
                 hits, total = mods.search(query, self.target, limit=30, sort=sort)
@@ -1782,6 +1845,7 @@ class RealmsDialog:
         self.win = None
         self.tree = None
         self.status = None
+        self._realms: list = []
 
     def show(self):
         app = self.app
@@ -1826,7 +1890,7 @@ class RealmsDialog:
         ttk.Button(acts, text="Join selected", command=self._join).pack(side="left")
         ttk.Button(acts, text="Copy address",
                    command=self._copy_address).pack(side="left", padx=(8, 0))
-        ttk.Label(acts, text="Join the realm from Minecraft's Multiplayer → Realms screen.",
+        ttk.Label(acts, text="Join starts Minecraft and connects to the selected realm.",
                   style="Dim.TLabel").pack(side="right")
 
         self.status = ttk.Label(win, text="Loading realms ...", style="Sub.TLabel")
@@ -1843,7 +1907,8 @@ class RealmsDialog:
 
         def work():
             try:
-                realms = auth.realms_list(self.app.account)
+                realms = auth.realms_list(self.app.account,
+                                          self.app.settings.get("last_version", ""))
                 results.put((realms, ""))
             except Exception as exc:  # noqa: BLE001
                 results.put((None, str(exc)))
@@ -1896,32 +1961,92 @@ class RealmsDialog:
         r = self._selected()
         if not r:
             return
-        if r.get("expired") or r.get("state") != "open":
+        if r.get("expired") or str(r.get("state") or "").lower() != "open":
             messagebox.showinfo(APP_NAME,
                                 "This realm is not open for joining right now.",
                                 parent=self.win)
             return
-        app = self.app
-        acct = app.account
-        msg = ("To join '%s':\n\n"
-               "1. Open Minecraft from this launcher.\n"
-               "2. Go to Multiplayer → Realms.\n"
-               "3. Select '%s' and click Join.\n\n"
-               "Make sure you are signed in with the same Microsoft account "
-               "(%s)." % (r.get("name", "this realm"), r.get("name", "this realm"),
-                          acct.get("name", "your account")))
-        messagebox.showinfo(APP_NAME, msg, parent=self.win)
+        if self.app.busy or self.app.game:
+            messagebox.showinfo(APP_NAME,
+                                "A game is already running or being prepared.",
+                                parent=self.win)
+            return
+        self.status.configure(text="Getting realm address for %s..." % r.get("name", "realm"))
+        win = self.win
+        results = queue.Queue()
+
+        def work():
+            try:
+                addr = auth.realms_address(self.app.account, r.get("id"),
+                                           self.app.settings.get("last_version", ""))
+                results.put((addr, ""))
+            except Exception as exc:  # noqa: BLE001
+                results.put(("", str(exc)))
+
+        def poll():
+            try:
+                addr, err = results.get_nowait()
+            except queue.Empty:
+                if win.winfo_exists():
+                    win.after(150, poll)
+                return
+            if not win.winfo_exists():
+                return
+            if err:
+                self.status.configure(text="Could not join realm: " + err)
+                messagebox.showwarning(APP_NAME,
+                                       "Could not join realm:\n\n%s\n\n"
+                                       "If the realm is yours, open Minecraft once and "
+                                       "accept the Realms terms, then try again." % err,
+                                       parent=win)
+                return
+            self.status.configure(text="Launching Minecraft for %s..." % r.get("name", "realm"))
+            self.app.play_server(addr)
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=work, name="saxic-realms-join", daemon=True).start()
+        win.after(150, poll)
 
     def _copy_address(self):
         r = self._selected()
         if not r:
             return
-        try:
-            self.win.clipboard_clear()
-            self.win.clipboard_append(r.get("name", ""))
-            self.status.configure(text="Realm name copied to clipboard.")
-        except tk.TclError:
-            pass
+        self.status.configure(text="Getting realm address...")
+        win = self.win
+        results = queue.Queue()
+
+        def work():
+            try:
+                addr = auth.realms_address(self.app.account, r.get("id"),
+                                           self.app.settings.get("last_version", ""))
+                results.put((addr, ""))
+            except Exception as exc:  # noqa: BLE001
+                results.put(("", str(exc)))
+
+        def poll():
+            try:
+                addr, err = results.get_nowait()
+            except queue.Empty:
+                if win.winfo_exists():
+                    win.after(150, poll)
+                return
+            if not win.winfo_exists():
+                return
+            if err:
+                self.status.configure(text="Could not get address: " + err)
+                return
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(addr)
+                self.status.configure(text="Realm address copied to clipboard.")
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=work, name="saxic-realms-addr", daemon=True).start()
+        win.after(150, poll)
 
 
 class SettingsDialog:
@@ -1954,6 +2079,7 @@ class SettingsDialog:
             "game_args": tk.StringVar(value=s.get("game_args", "")),
             "window_width": tk.StringVar(value=str(s.get("window_width", 0) or 0)),
             "window_height": tk.StringVar(value=str(s.get("window_height", 0) or 0)),
+            "low_memory": tk.StringVar(value=str(s.get("low_memory", "auto")).capitalize()),
         }
 
         # Scrollable body so every option stays reachable on small screens.
@@ -2108,6 +2234,17 @@ class SettingsDialog:
         next_row()
         add_hint("Width x height in pixels. 0 x 0 lets Minecraft choose the window size.")
 
+        add_section("STABILITY")
+
+        add_label("Performance mode")
+        ttk.Combobox(body, textvariable=vals["low_memory"], state="readonly", width=14,
+                     values=["Auto", "On", "Off"]).grid(
+            row=row[0], column=1, sticky="w", padx=(0, 14), pady=6)
+        next_row()
+        add_hint("Auto turns stability mode on when this PC has no pagefile or little "
+                 "free memory. It caps native JVM memory, uses the lighter G1 collector "
+                 "and lowers render distance so long play sessions do not crash.")
+
         add_section("BEHAVIOUR")
         ttk.Checkbutton(body, text="Keep launcher visible while playing",
                         variable=vals["keep_open"]).grid(
@@ -2168,6 +2305,7 @@ class SettingsDialog:
             "game_args": vals["game_args"].get().strip(),
             "window_width": pixels(vals["window_width"]),
             "window_height": pixels(vals["window_height"]),
+            "low_memory": vals["low_memory"].get().strip().lower() or "auto",
         })
         save_settings(app.settings)
         app.snap_var.set(app.settings["show_snapshots"])

@@ -43,14 +43,19 @@ MOD_CATEGORIES = {
         "synthetic-threads", "argon", "entity-distance-fade", "cull-leaves",
         "parallax-chunks", "distant-horizons", "entity-distance-fade",
         "fast-furnace", "fast-bench", "fast-workbench", "torch-master",
-        "sleeping-in-cages", "quick-shulker",
+        "sleeping-in-cages", "quick-shulker", "indium", "memoryleakfix",
+        "fastload", "lazy-dfu", "noisium", "threadtweak",
+        "sodium-shadowy-path-blocks",
     ],
     "Visuals & Shaders": [
         "iris", "continuity", "sodium-extra", "reeses-sodium-options",
         "lambdynamiclights", "entitytexturefeatures", "entity-model-features",
         "3dskinlayers", "debugify", "embeddedyouth", "composable-shaders",
         "starlight", "oculus", "entity-rendering", "kerosin",
-        "entity-culling-fix",
+        "entity-culling-fix", "falling-leaves", "visuality", "particular",
+        "effective", "wakes", "first-person-model", "eating-animation",
+        "capes", "cit-resewn", "fabricskyboxes", "cameraoverhaul",
+        "ok-zoomer", "wi-zoom",
     ],
     "Quality of Life": [
         "modmenu", "appleskin", "jei", "jade", "mouse-tweaks",
@@ -59,41 +64,78 @@ MOD_CATEGORIES = {
         "konkrete", "melody", "tweakeroo", "minihud", "axiom",
         "not-enough-animations", "particle-rain", "roughly-enough-items",
         "item-tooltips", "mouse-wheelie", "control-room", "janitor",
-        "keep-inventory", "go-to-bed",
+        "keep-inventory", "go-to-bed", "emi", "trashslot",
+        "inventory-sorter", "toast-control", "screenshot-to-clipboard",
+        "better-ping-display", "tooltipfix", "legendary-tooltips",
+        "no-telemetry", "boat-item-view", "elytra-flight-hud",
+        "do-a-barrel-roll",
     ],
     "Libraries & API": [
         "fabric-api", "architectury-api", "malilib", "puzzles-lib",
         "geckolib", "collective", "bookshelf-lib", "creativecore",
-        "fzzy-config", "creativecore",
+        "fzzy-config", "creativecore", "fabric-language-kotlin",
+        "spell-engine", "ranged-weapon-api",
     ],
     "World & Generation": [
         "terralith", "nullscape", "biomes-o-plenty", "explorers-compass",
         "natures-compass", "waystones", "xaeros-minimap", "xaeros-world-map",
         "oh-the-biomes-youll-go", "present", "worldedit",
+        "yungs-better-dungeons", "yungs-better-strongholds",
+        "yungs-better-mineshafts", "yungs-better-desert-temples",
+        "yungs-better-nether-fortresses", "when-dungeons-arise",
+        "dungeons-and-taverns", "structory", "incendium",
+        "amplified-nether", "cinderscapes", "traverse",
+        "regions-unexplored", "tectonic", "geophilic",
     ],
     "Tools & Building": [
         "litematica", "chunky", "structure-gel", "building-utilities",
-        "schematica", "print",
+        "schematica", "print", "building-gadgets", "construction-wand",
+        "effortless-building",
     ],
     "Storage & Inventory": [
         "storagedrawers", "inventory-management", "cooking-for-blockheads",
         "veinminer", "shulkerboxtooltip", "backpacks", "iron-chests",
         "barrels", "inventory-profiles-next", "item-physics",
+        "travelers-backpack", "expanded-storage", "trash-cans",
     ],
     "Magic & Adventure": [
         "ars-nouveau", "apotheosis", "better-combat", "epic-fight",
         "alexs-mobs", "nature-aura", "create", "origin",
         "blood-magic", "dank-null", "ender-chest-inventory",
+        "wizards", "paladins", "berserker", "simply-swords",
+        "aquamirae",
     ],
     "Horror": [
         "the-zone", "liminal", "creeping-dawn", "the-void", "nightmare",
         "scare", "horror-mod", "entity-303", "void-darkness", "creeping",
-        "liminal-spaces", "the-backrooms",
+        "liminal-spaces", "the-backrooms", "from-the-fog", "cave-dweller",
+        "the-man-from-the-fog", "siren-head", "sculk-horde", "the-rotting",
     ],
     "Food & Farming": [
         "cooking-for-blockheads", "farmers-delight", "crop-maturity",
         "animal-troughs", "shear-madness", "milkables", "egg-basket",
+        "croptopia", "simple-farming", "bakery", "candlelight",
+        "beachparty", "vinery", "meadow", "expanded-delight",
+        "farmers-respite", "nethers-delight", "ends-delight",
     ],
+}
+
+
+# Live category filters. Category pages are built from Modrinth's own tags,
+# filtered to Fabric builds of the selected Minecraft version. That way every
+# mod a player sees is actually installable, even right after a new Minecraft
+# release when many hand-picked mods have no build yet.
+CATEGORY_FILTERS = {
+    "Performance": {"tags": ["optimization"]},
+    "Visuals & Shaders": {"tags": ["decoration"]},
+    "Quality of Life": {"tags": ["utility"]},
+    "Libraries & API": {"tags": ["library"]},
+    "World & Generation": {"tags": ["worldgen"]},
+    "Tools & Building": {"queries": ["building"]},
+    "Storage & Inventory": {"tags": ["storage"]},
+    "Magic & Adventure": {"tags": ["magic", "adventure"]},
+    "Horror": {"queries": ["horror", "scary", "haunted"]},
+    "Food & Farming": {"tags": ["food"]},
 }
 
 
@@ -122,14 +164,20 @@ def category_names() -> list:
 
 
 def search(query: str = "", game_version: str = "", offset: int = 0,
-           limit: int = 20, sort: str = "relevance"):
-    """Return ``(hits, total)`` for Fabric mods matching ``query``."""
+           limit: int = 20, sort: str = "relevance", tags: list | None = None):
+    """Return ``(hits, total)`` for Fabric mods matching ``query``.
+
+    ``tags`` is an OR-list of Modrinth category tags (for example
+    ``["magic", "adventure"]``); every hit must carry at least one of them.
+    """
     facets = [["project_type:mod"], ["categories:" + LOADER]]
+    if tags:
+        facets.append(["categories:" + str(t).lower() for t in tags if str(t).strip()])
     if game_version:
         facets.append(["versions:" + game_version])
     params = {
         "query": query or "",
-        "limit": str(max(1, min(50, int(limit)))),
+        "limit": str(max(1, min(100, int(limit)))),
         "offset": str(max(0, int(offset))),
         "index": sort or "relevance",
         "facets": json.dumps(facets),
@@ -220,52 +268,45 @@ def pick_version(versions: list, prefer_release: bool = True) -> dict | None:
 
 
 def featured_mods(game_version: str = "", limit: int = 60) -> list:
-    """Curated popular Fabric mods that have a build for this version.
+    """Popular Fabric mods that have a build for this version.
 
-    Returns one hit per mod that we know works, newest stable build first.
+    Uses Modrinth's live search, so every hit is installable for
+    ``game_version`` even right after a Minecraft release.
     """
     return featured_mods_by_category("", game_version, limit)
 
 
 def featured_mods_by_category(category: str, game_version: str = "",
                               limit: int = 60) -> list:
-    """Curated mods for ``category`` that have a build for this version.
+    """Popular Fabric mods for a library category that work with this version.
 
-    When ``category`` is empty every curated category is used. Returns one
-    hit per mod that we know works, newest stable build first.
+    The category is a live Modrinth query (see ``CATEGORY_FILTERS``) filtered
+    to builds for ``game_version``. Every returned mod really has a compatible
+    Fabric build, which matters because hand-picked lists go stale whenever
+    Minecraft updates.
     """
-    slugs = category_slugs(category) if category else all_category_slugs()
+    limit = max(1, min(100, int(limit)))
+    if not category:
+        hits, _total = search("", game_version, limit=limit, sort="downloads")
+        return hits
+
+    rule = CATEGORY_FILTERS.get(category)
+    if not rule:
+        return []
+
     out = []
-    for slug in slugs:
-        if len(out) >= limit:
-            break
-        try:
-            versions = project_versions(slug, game_version)
-            v = pick_version(versions, prefer_release=True)
-            f = primary_file(v) if v else None
-        except Exception:  # noqa: BLE001
-            continue
-        if not v or not f:
-            continue
-        try:
-            info = http_json(API + "/project/%s" % slug)
-        except Exception:  # noqa: BLE001
-            continue
-        out.append({
-            "project_id": info.get("project_id") or v.get("project_id") or "",
-            "slug": slug,
-            "title": info.get("title") or v.get("name") or slug,
-            "description": info.get("description") or "",
-            "author": info.get("author") or "",
-            "downloads": int(info.get("downloads") or 0),
-            "follows": int(info.get("follows") or 0),
-            "icon_url": info.get("icon_url") or "",
-            "categories": info.get("categories") or [],
-            "versions": info.get("versions") or [],
-            "_version": v,
-            "_file": f,
-        })
-    return out
+    seen = set()
+    for query in rule.get("queries") or [""]:
+        hits, _total = search(query, game_version, limit=limit, sort="downloads",
+                              tags=rule.get("tags"))
+        for hit in hits:
+            slug = hit.get("slug")
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            out.append(hit)
+    out.sort(key=lambda h: h.get("downloads") or 0, reverse=True)
+    return out[:limit]
 
 
 # --------------------------------------------------------------------------
