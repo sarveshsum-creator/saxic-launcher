@@ -1,4 +1,4 @@
-"""SAXIC Launcher - mod library (Modrinth's public API, Fabric mods).
+"""XI Launcher - mod library (Modrinth's public API, Fabric mods).
 
 Mods are plain jar files in ``<game folder>/mods``. Installing one also makes
 sure Fabric is set up for the selected Minecraft version, because vanilla

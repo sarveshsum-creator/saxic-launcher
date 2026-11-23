@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title SAXIC Launcher - enable pagefile
+title XI Launcher - enable pagefile
 
 rem Re-launch this file elevated (administrator) if needed.
 net session >nul 2>&1
@@ -11,7 +11,8 @@ if errorlevel 1 (
 )
 
 echo ============================================================
-echo  ENABLE WINDOWS PAGEFILE  -  fixes large modpack crashes
+echo  XI LAUNCHER - ENABLE WINDOWS PAGEFILE
+echo  fixes large modpack crashes
 echo ============================================================
 echo.
 echo Without a pagefile Windows can only use physical RAM. A big
@@ -21,7 +22,6 @@ echo.
 echo This adds a fixed pagefile on C: (8 GB, or 4 GB if disk is
 echo tight). A restart is required.
 echo.
-
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0enable-pagefile.ps1"
 if errorlevel 1 (
   echo.

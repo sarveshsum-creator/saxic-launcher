@@ -1,4 +1,4 @@
-# SAXIC Launcher - enable a fixed Windows pagefile (needs administrator).
+# XI Launcher - enable a fixed Windows pagefile (needs administrator).
 # Run through enable-pagefile.cmd, which elevates automatically.
 $ErrorActionPreference = 'Stop'
 

@@ -1,4 +1,4 @@
-"""SAXIC Launcher - install engine (version files, libraries, assets, Java).
+"""XI Launcher - install engine (version files, libraries, assets, Java).
 
 Downloads happen straight from Mojang's public metadata URLs, exactly the
 data the official launcher reads. All code here is original to this project.
@@ -658,15 +658,15 @@ def write_launcher_profile(game_dir: str, version_id: str) -> None:
         return
     profile = {
         "profiles": {
-            "SAXIC": {
-                "name": "SAXIC",
+            "XI": {
+                "name": "XI",
                 "type": "custom",
                 "lastVersionId": version_id,
                 "created": "1970-01-01T00:00:00.000Z",
             }
         },
-        "selectedProfile": "SAXIC",
-        "clientToken": "saxic-launcher",
+        "selectedProfile": "XI",
+        "clientToken": "xi-launcher",
     }
     try:
         with open(path, "w", encoding="utf-8") as fh:

@@ -1,5 +1,5 @@
 @echo off
-rem SAXIC Launcher - publish local changes.
+rem XI Launcher - publish local changes.
 rem Commits everything, pushes to GitHub, and the Action rebuilds the download.
 cd /d "%~dp0"
 
@@ -30,10 +30,10 @@ if errorlevel 1 (
 )
 
 echo.
-echo Pushed. GitHub is rebuilding SAXIC-Launcher.exe now (about 1-2 minutes).
+echo Pushed. GitHub is rebuilding XI-Launcher.exe now (about 1-2 minutes).
 set "GH=C:\Program Files\GitHub CLI\gh.exe"
 if exist "%GH%" (
-  for /f "delims=" %%u in ('"%GH%" api user --jq .login 2^>nul') do echo Download: https://github.com/%%u/saxic-launcher/releases/latest
+  for /f "delims=" %%u in ('"%GH%" api user --jq .login 2^>nul') do echo Download: https://github.com/%%u/xi-launcher/releases/latest
   echo Open the releases page and refresh it to see the new build.
 )
 pause

@@ -1,4 +1,4 @@
-"""SAXIC Launcher - offline self-check (no big downloads).
+"""XI Launcher - offline self-check (no big downloads).
 
 Verifies the metadata pipeline and the launch command builder:
 
@@ -184,6 +184,67 @@ def main(argv):
         "relative time recent": util.relative_time(time.time() - 7200).endswith("ago"),
     }
     for name, ok in world_checks.items():
+        print(("PASS " if ok else "FAIL ") + name)
+        fails += 0 if ok else 1
+    _shutil.rmtree(here_self, ignore_errors=True)
+
+    print("\n--- XI Server Hoster ---")
+    import socket as _socket
+    import zipfile as _zipfile
+
+    import saxic_servers as srv
+
+    server_game = os.path.join(here_self, "servergame")
+    server_path = os.path.join(srv.servers_root(server_game), "smoke-server")
+    os.makedirs(os.path.join(server_path, "world"), exist_ok=True)
+    open(os.path.join(server_path, "world", "level.dat"), "wb").write(b"level")
+    open(os.path.join(server_path, "world", "region.mca"), "wb").write(b"region")
+    fake_server = {
+        "id": "smoke-server", "name": "Smoke Server", "software": "Paper",
+        "version": "26.3", "ram_mb": 2048, "port": srv.next_free_port(25650),
+        "online_mode": True, "motd": "XI test", "max_players": 12,
+        "difficulty": "normal", "gamemode": "survival", "eula_accepted": True,
+        "created": time.time(), "jar": "server.jar", "path": server_path,
+    }
+    srv.write_eula(fake_server, True)
+    srv.apply_properties(fake_server)
+    srv.save_server(fake_server)
+    loaded = srv.load_servers(server_game)
+    props = srv.read_properties(os.path.join(server_path, "server.properties"))
+    cmd = srv.server_command(loaded[0], r"C:\fake\java.exe")
+
+    busy = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    busy.bind(("0.0.0.0", 0))
+    busy.listen(1)
+    busy_port = busy.getsockname()[1]
+    port_taken = not srv.port_free(busy_port)
+    busy.close()
+
+    backup_zip = srv.create_backup(loaded[0])
+    backups = srv.list_backups(loaded[0])
+    restored_world = srv.restore_backup(loaded[0], backup_zip)
+    restore_ok = os.path.isfile(os.path.join(restored_world, "level.dat"))
+    with _zipfile.ZipFile(backup_zip) as zf:
+        zip_names = [n.replace("\\", "/") for n in zf.namelist()]
+
+    server_checks = {
+        "slugify keeps safe ids": srv.slugify("My XI Server!") == "my-xi-server",
+        "server metadata saved/loaded": len(loaded) == 1
+                                         and loaded[0]["name"] == "Smoke Server",
+        "properties written": props.get("server-port") == str(fake_server["port"])
+                              and props.get("motd") == "XI test"
+                              and props.get("max-players") == "12",
+        "online mode property": props.get("online-mode") == "true",
+        "eula written": os.path.isfile(os.path.join(server_path, "eula.txt")),
+        "start command has heap and jar": any(a.startswith("-Xmx2048m") for a in cmd)
+                                           and "server.jar" in cmd and "nogui" in cmd,
+        "port check sees a listener": port_taken,
+        "backup zip made": os.path.isfile(backup_zip) and "world/level.dat" in zip_names,
+        "backup is listed": len(backups) == 1,
+        "restore brings the world back": restore_ok,
+        "three server softwares": set(srv.SOFTWARES) == {"Vanilla", "Paper", "Fabric"},
+    }
+    for name, ok in server_checks.items():
         print(("PASS " if ok else "FAIL ") + name)
         fails += 0 if ok else 1
     _shutil.rmtree(here_self, ignore_errors=True)

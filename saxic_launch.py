@@ -1,4 +1,4 @@
-"""SAXIC Launcher - build the Java command line and run the game.
+"""XI Launcher - build the Java command line and run the game.
 
 The argument templating follows the public "launcher arguments" spec that
 every Minecraft launcher implements (placeholders like ${auth_player_name}).
@@ -13,8 +13,8 @@ import threading
 
 from saxic_util import allowed_args, offline_uuid, os_name, sha1_hex
 
-LAUNCHER_NAME = "saxic-launcher"
-LAUNCHER_VERSION = "1.0"
+LAUNCHER_NAME = "xi-launcher"
+LAUNCHER_VERSION = "1.1"
 
 
 # --------------------------------------------------------------------------

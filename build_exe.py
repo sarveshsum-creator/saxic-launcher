@@ -1,8 +1,8 @@
-"""Build a standalone Windows .exe for the SAXIC Launcher.
+"""Build a standalone Windows .exe for XI Launcher.
 
     python build_exe.py
 
-Produces dist/SAXIC-Launcher.exe (one file, no console window, launcher icon).
+Produces dist/XI-Launcher.exe (one file, no console window, launcher icon).
 The build writes a temporary saxic_build.py so the Credits window shows the
 date of this build, and removes it again afterwards.
 """
@@ -16,7 +16,7 @@ import zipfile
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NAME = "SAXIC-Launcher"
+NAME = "XI-Launcher"
 STAMP = os.path.join(HERE, "saxic_build.py")
 
 
@@ -64,17 +64,21 @@ def main() -> int:
 
 def write_share_zip(exe: str) -> str:
     """Bundle the exe with a plain-text quick start for easy sharing."""
-    dest = os.path.join(HERE, "dist", "SAXIC-Launcher-win64.zip")
+    dest = os.path.join(HERE, "dist", "XI-Launcher-win64.zip")
     quick_start = (
-        "SAXIC Launcher 1.0 for Windows\n"
-        "==============================\n\n"
-        "1. Double-click SAXIC-Launcher.exe (inside this zip).\n"
+        "XI Launcher 1.1 for Windows\n"
+        "============================\n\n"
+        "1. Double-click XI-Launcher.exe (inside this zip).\n"
         "2. Pick a Minecraft version and press PLAY.\n\n"
+        "XI SERVER HOSTER\n"
+        "  Click 'Server hoster' in the top bar to create a Vanilla, Paper or\n"
+        "  Fabric server. Press Start, then Join server. Friends on the same\n"
+        "  Wi-Fi can connect with the LAN address shown in the Share window.\n\n"
         "No installer and no Python are needed. Java for Minecraft is\n"
-        "downloaded automatically the first time you play.\n\n"
+        "downloaded automatically the first time you play or start a server.\n\n"
         "The first launch downloads about 0.8 GB of game files to\n"
         "%APPDATA%\\.saxic and keeps launcher settings in\n"
-        "%APPDATA%\\SAXIC Launcher. You can change the game folder in Settings.\n\n"
+        "%APPDATA%\\XI Launcher. You can change the game folder in Settings.\n\n"
         "Windows SmartScreen may say the app is unrecognised because the exe\n"
         "is not code-signed. Choose More info, then Run anyway.\n\n"
         "IF THE GAME CLOSES AFTER A FEW MINUTES:\n"
@@ -83,6 +87,8 @@ def write_share_zip(exe: str) -> str:
         "  have enough memory to keep running.\n\n"
         "Created 18 November 2026 by SARVESH.S / srxvesh._.11.\n"
         "Inspired by clumsydev. Not affiliated with Mojang or Microsoft.\n"
+        "XI Server Hoster runs servers on your own PC; it is not a cloud\n"
+        "service and is not affiliated with Aternos.\n"
     )
     extras = [("README-FIRST.txt", quick_start)]
     for name in ("README.md", "LICENSE", "enable-pagefile.cmd", "enable-pagefile.ps1"):

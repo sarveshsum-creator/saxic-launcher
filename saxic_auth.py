@@ -1,4 +1,4 @@
-"""SAXIC Launcher - accounts.
+"""XI Launcher - accounts.
 
 Two ways to play:
 
@@ -46,7 +46,7 @@ def _post(url: str, data: dict, headers=None, form=True, timeout=40):
         body = json.dumps(data).encode()
         hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
     hdrs.update(headers or {})
-    hdrs.setdefault("User-Agent", "SAXICLauncher/1.0")
+    hdrs.setdefault("User-Agent", "XILauncher/1.1")
     req = urllib.request.Request(url, data=body, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -60,7 +60,7 @@ def _get(url: str, token: str, timeout=40):
     req = urllib.request.Request(url, headers={
         "Authorization": "Bearer " + token,
         "Accept": "application/json",
-        "User-Agent": "SAXICLauncher/1.0",
+        "User-Agent": "XILauncher/1.1",
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -191,7 +191,7 @@ def _realms_headers(account: dict, game_version: str = "") -> dict:
             account.get("access_token") or "", uuid,
             account.get("name") or "", version),
         "Accept": "application/json",
-        "User-Agent": "SAXICLauncher/1.0",
+        "User-Agent": "XILauncher/1.1",
         "Is-Prerelease": "false" if release else "true",
     }
 

@@ -1,8 +1,8 @@
-"""SAXIC Launcher - desktop app (Python + Tkinter, standard library only).
+"""XI Launcher - desktop app (Python + Tkinter, standard library only).
 
-Run with:  python saxic_launcher.py     (or double-click "SAXIC Launcher.bat")
+Run with:  python saxic_launcher.py     (or double-click "XI Launcher.bat")
 
-Everything in this folder is original code for the SAXIC Launcher project.
+Everything in this folder is original code for the XI Launcher project.
 It reads Mojang's public metadata to install and start Minecraft, the same
 way any launcher does; it ships no game files itself.
 """
@@ -25,6 +25,7 @@ import saxic_auth as auth
 import saxic_install as install
 import saxic_launch as launch
 import saxic_mods as mods
+import saxic_servers as servers
 try:
     from saxic_build import BUILD_DATE as BUILD_DATE_STAMP
 except Exception:  # source tree without a build stamp
@@ -38,8 +39,8 @@ from saxic_util import (Cancelled, app_dir, available_ram_mb, backup_world,
                         scan_worlds, screenshots_dir, tune_options_for_memory,
                         worlds_dir)
 
-APP_NAME = "SAXIC Launcher"
-APP_VERSION = "1.0"
+APP_NAME = "XI Launcher"
+APP_VERSION = "1.1"
 APP_DIR = app_dir()
 HERE = data_dir()
 SETTINGS_PATH = os.path.join(HERE, "settings.json")
@@ -211,6 +212,8 @@ class App:
         self.version_cache: dict = {}
         self.entries: list = []
         self._session = None  # (version_id, start_time) while a game runs
+        self.server_manager = servers.ServerManager(
+            self.settings["game_dir"], log=lambda text: self.q("log", "[server] " + text))
 
         root.title("%s %s" % (APP_NAME, APP_VERSION))
         root.configure(bg=BG)
@@ -249,6 +252,10 @@ class App:
                foreground=[("disabled", DIM)])
         st.configure("Stop.TButton", background="#3a1d1d", foreground="#ffd7d7")
         st.map("Stop.TButton", background=[("active", "#4d2626")])
+        st.configure("Accent.TButton", background=ACCENT, foreground="#04121f",
+                     font=("Segoe UI Semibold", 9), padding=(12, 6))
+        st.map("Accent.TButton", background=[("active", "#6fb6ff"), ("disabled", "#1f3a52")],
+               foreground=[("disabled", DIM)])
         st.configure("TCheckbutton", background=BG, foreground=DIM)
         st.map("TCheckbutton", background=[("active", BG)])
         st.configure("TEntry", fieldbackground=PANEL2, foreground=TEXT, insertcolor=TEXT)
@@ -277,6 +284,8 @@ class App:
         self.logo.pack(side="left")
         self._draw_logo()
         ttk.Label(top, text=APP_NAME.upper(), style="Head.TLabel").pack(side="left", padx=(10, 0))
+        ttk.Button(top, text="Server hoster", command=self.open_servers,
+                   style="Accent.TButton").pack(side="left", padx=(14, 0))
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
         ttk.Button(top, text="Credits", command=self.open_credits).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="News", command=self.open_news).pack(side="right", padx=(0, 8))
@@ -564,6 +573,27 @@ class App:
         else:
             messagebox.showinfo(APP_NAME, "Sign in with Microsoft first to use Realms.",
                                 parent=self.root)
+
+    def open_servers(self):
+        self.server_manager.game_dir = self.settings["game_dir"]
+        ServerHosterDialog(self).show()
+
+    def shutdown(self):
+        """Close the launcher cleanly, stopping the game and any servers."""
+        try:
+            if self.game:
+                self.game.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            for runtime in self.server_manager.running():
+                runtime.stop(timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def log_line(self, text: str):
         self.log.configure(state="normal")
@@ -2049,6 +2079,1196 @@ class RealmsDialog:
         win.after(150, poll)
 
 
+def _background(win, work, done=None, on_error=None):
+    """Run ``work`` off the Tk thread and deliver the result on the Tk thread."""
+    results: queue.Queue = queue.Queue()
+
+    def runner():
+        try:
+            results.put((True, work()))
+        except Exception as exc:  # noqa: BLE001
+            results.put((False, exc))
+
+    threading.Thread(target=runner, daemon=True).start()
+
+    def poll():
+        if win is None or not win.winfo_exists():
+            return
+        try:
+            ok, value = results.get_nowait()
+        except queue.Empty:
+            win.after(120, poll)
+            return
+        if ok:
+            if done:
+                done(value)
+        elif on_error:
+            on_error(value)
+        else:
+            messagebox.showerror(APP_NAME, str(value), parent=win)
+
+    win.after(120, poll)
+
+
+class ServerHosterDialog:
+    """XI Server Hoster: create and run Minecraft servers on this PC.
+
+    The workflow is inspired by Aternos (create, start, console, backups,
+    share), but it is entirely local: the server jar runs in a Java process
+    owned by the launcher. No Aternos code, API or servers are used.
+    """
+
+    def __init__(self, app: App):
+        self.app = app
+        self.win = None
+        self.tree = None
+        self.status = None
+        self.servers: list = []
+        self._poll_id = None
+        self._consoles: dict = {}
+        self._children: list = []
+
+    # ---------------------------------------------------------------- window
+    def show(self):
+        app = self.app
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("XI Server Hoster")
+        win.configure(bg=BG)
+        win.geometry("960x650")
+        win.minsize(880, 560)
+        win.transient(app.root)
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=16, pady=(14, 2))
+        ttk.Label(head, text="XI SERVER HOSTER", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  Minecraft servers that run on this PC",
+                  style="Sub.TLabel").pack(side="left", pady=(6, 0))
+        ttk.Button(head, text="New server", style="Accent.TButton",
+                   command=self._new_server).pack(side="right")
+        ttk.Button(head, text="Servers folder", command=self._open_root).pack(
+            side="right", padx=(0, 8))
+
+        ttk.Label(win, text="Create a Vanilla, Paper or Fabric server, start it, "
+                            "watch the console, invite friends and keep backups. "
+                            "Unlike a cloud host, the server runs while this PC is on.",
+                  style="Dim.TLabel", wraplength=880, justify="left").pack(
+            anchor="w", padx=16, pady=(6, 0))
+
+        wrap = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        wrap.pack(fill="both", expand=True, padx=16, pady=(10, 0))
+        self.tree = ttk.Treeview(wrap, columns=("name", "software", "version",
+                                                "state", "players", "address"),
+                                 show="headings", style="Mods.Treeview",
+                                 selectmode="browse")
+        for col, text, width, anchor in (
+                ("name", "SERVER", 230, "w"),
+                ("software", "SOFTWARE", 90, "w"),
+                ("version", "VERSION", 80, "w"),
+                ("state", "STATUS", 100, "w"),
+                ("players", "PLAYERS", 80, "center"),
+                ("address", "LAN ADDRESS", 170, "w")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
+        tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda _e: self._open_console())
+
+        acts = ttk.Frame(win, style="TFrame")
+        acts.pack(fill="x", padx=16, pady=(10, 0))
+        ttk.Button(acts, text="Start", command=self._start).pack(side="left")
+        ttk.Button(acts, text="Stop", command=self._stop).pack(side="left", padx=(6, 0))
+        ttk.Button(acts, text="Console", command=self._open_console).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(acts, text="Join server", command=self._join).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(acts, text="Share", command=self._share).pack(side="left", padx=(6, 0))
+        ttk.Button(acts, text="Back up now", command=self._backup).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(acts, text="Backups", command=self._open_backups).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(acts, text="Options", command=self._options).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(acts, text="Delete", command=self._delete).pack(side="right")
+
+        self.status = ttk.Label(win, text="Loading servers ...", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=16, pady=(8, 12))
+
+        self.refresh()
+        self._poll_id = win.after(2000, self._poll)
+        win.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _poll(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        self.refresh()
+        self._poll_id = self.win.after(2000, self._poll)
+
+    def refresh(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        selection = self.tree.selection()
+        keep = selection[0] if selection else ""
+        try:
+            self.servers = self.app.server_manager.servers()
+        except Exception as exc:  # noqa: BLE001
+            self.status.configure(text="Could not read servers: %s" % exc)
+            return
+        self.tree.delete(*self.tree.get_children())
+        running = 0
+        lan = servers.lan_ip()
+        for s in self.servers:
+            runtime = self.app.server_manager.runtime(s)
+            snap = runtime.snapshot() if runtime else {}
+            state = snap.get("state") or "stopped"
+            if not s.get("eula_accepted") and state in ("stopped", ""):
+                state = "setup"
+            if state == "running":
+                running += 1
+            players = ("%d/%d" % (snap.get("player_count", 0),
+                                  snap.get("max_players", s.get("max_players", 10)))
+                       if state == "running" else "-")
+            label = {"setup": "EULA needed", "starting": "Starting",
+                     "running": "Running", "stopping": "Stopping",
+                     "stopped": "Stopped", "crashed": "Crashed"}.get(
+                         state, state.title())
+            self.tree.insert("", "end", iid=s["id"], values=(
+                s.get("name", s["id"]), s.get("software", "Vanilla"),
+                s.get("version", ""), label, players,
+                "%s:%d" % (lan, int(s.get("port") or 25565))))
+        if keep and self.tree.exists(keep):
+            self.tree.selection_set(keep)
+        self.status.configure(text="%d server%s  ·  %d running  ·  %s" % (
+            len(self.servers), "" if len(self.servers) == 1 else "s", running,
+            "Runs locally while this PC is on." if self.servers
+            else "No servers yet - press New server to create one."))
+
+    # ---------------------------------------------------------------- helpers
+    def _selected(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo(APP_NAME, "Pick a server first.", parent=self.win)
+            return None
+        for s in self.servers:
+            if s["id"] == selection[0]:
+                return s
+        return None
+
+    def _run_bg(self, work, done=None, label=""):
+        if label:
+            self.status.configure(text=label)
+
+        def failed(error):
+            self.status.configure(text="Failed: " + str(error))
+            messagebox.showerror(APP_NAME, str(error), parent=self.win)
+            self.refresh()
+
+        def finished(value):
+            try:
+                if done:
+                    done(value)
+            finally:
+                self.refresh()
+
+        _background(self.win, work, finished, failed)
+
+    def _state(self, server):
+        runtime = self.app.server_manager.runtime(server)
+        snap = runtime.snapshot() if runtime else {}
+        return runtime, snap, (snap.get("state") or "stopped")
+
+    def _accept_eula(self, server) -> bool:
+        if server.get("eula_accepted"):
+            return True
+        ok = messagebox.askyesno(
+            APP_NAME,
+            "Minecraft requires you to accept its EULA before a server can start.\n\n"
+            "Read it at %s\n\n"
+            "Do you accept the Minecraft EULA?" % servers.EULA_URL,
+            parent=self.win)
+        if not ok:
+            return False
+        server["eula_accepted"] = True
+        servers.write_eula(server, True)
+        servers.save_server(server)
+        self.refresh()
+        return True
+
+    # ---------------------------------------------------------------- actions
+    def _new_server(self):
+        ServerCreateDialog(self).show()
+
+    def _start(self):
+        s = self._selected()
+        if s:
+            self._start_server(s)
+
+    def _start_server(self, server):
+        if not self._accept_eula(server):
+            return
+        runtime, _snap, _state = self._state(server)
+        if runtime and runtime.alive():
+            self.status.configure(text="%s is already running." % server["name"])
+            return
+        name = server["name"]
+        self._run_bg(lambda: self.app.server_manager.start(server),
+                     lambda _r: self.status.configure(text="%s is starting..." % name),
+                     "Starting %s ..." % name)
+
+    def _stop(self):
+        s = self._selected()
+        if s:
+            self._stop_server(s)
+
+    def _stop_server(self, server):
+        runtime, _snap, _state = self._state(server)
+        if not runtime or not runtime.alive():
+            self.status.configure(text="%s is not running." % server["name"])
+            return
+        name = server["name"]
+        self._run_bg(lambda: self.app.server_manager.stop(server, timeout=30),
+                     lambda _r: self.status.configure(text="%s stopped." % name),
+                     "Stopping %s ..." % name)
+
+    def _open_console(self):
+        s = self._selected()
+        if not s:
+            return
+        existing = self._consoles.get(s["id"])
+        if existing and existing.win and existing.win.winfo_exists():
+            existing.win.deiconify()
+            existing.win.lift()
+            return
+        dialog = ServerConsoleDialog(self, s)
+        self._consoles[s["id"]] = dialog
+        self._children.append(dialog)
+        dialog.show()
+
+    def _join(self):
+        s = self._selected()
+        if not s:
+            return
+        if self.app.busy or self.app.game:
+            messagebox.showinfo(APP_NAME, "A game is already running or being prepared.",
+                                parent=self.win)
+            return
+        runtime, snap, state = self._state(s)
+        if state == "running":
+            self._launch_join(s)
+            return
+        if state == "crashed":
+            messagebox.showerror(APP_NAME,
+                                 "The server crashed:\n\n%s" %
+                                 (snap.get("error") or "see the console for details"),
+                                 parent=self.win)
+            return
+        if not messagebox.askyesno(
+                APP_NAME, "This server is not running yet.\n\n"
+                          "Start it and join when it is ready?", parent=self.win):
+            return
+        if not self._accept_eula(s):
+            return
+        self._wait_then_join(s, time.time() + 180)
+
+    def _wait_then_join(self, server, deadline):
+        if not self.win or not self.win.winfo_exists():
+            return
+        if self.app.busy or self.app.game:
+            self.status.configure(text="Not joining - a game is already running.")
+            return
+        runtime, snap, state = self._state(server)
+        if state == "running":
+            self._launch_join(server)
+            return
+        if state == "crashed":
+            messagebox.showerror(APP_NAME, "The server crashed before Minecraft could join:\n\n%s"
+                                 % (snap.get("error") or "see the console"), parent=self.win)
+            return
+        if time.time() > deadline:
+            self.status.configure(text="Timed out waiting for %s. Check the console." %
+                                  server["name"])
+            return
+        if not runtime or not runtime.alive():
+            self._run_bg(lambda: self.app.server_manager.start(server),
+                         lambda _r: self._wait_then_join(server, deadline),
+                         "Starting %s for you ..." % server["name"])
+            return
+        self.status.configure(text="Waiting for %s to finish starting ..." % server["name"])
+        self.win.after(1000, lambda: self._wait_then_join(server, deadline))
+
+    def _launch_join(self, server):
+        address = "127.0.0.1:%d" % int(server.get("port") or 25565)
+        self.status.configure(text="Launching Minecraft and joining %s ..." % address)
+        self.app.play_server(address)
+
+    def _backup(self):
+        s = self._selected()
+        if not s:
+            return
+        self._backup_server(s)
+
+    def _backup_server(self, server):
+        runtime = self.app.server_manager.runtime(server)
+        name = server["name"]
+
+        def done(path):
+            messagebox.showinfo(APP_NAME, "Backup ready:\n\n%s" % os.path.basename(path),
+                                parent=self.win)
+            self.status.configure(text="Backup saved for %s." % name)
+
+        self._run_bg(lambda: servers.create_backup_safe(server, runtime),
+                     done, "Backing up %s ..." % name)
+
+    def _open_backups(self):
+        s = self._selected()
+        if not s:
+            return
+        dialog = ServerBackupsDialog(self, s)
+        self._children.append(dialog)
+        dialog.show()
+
+    def _options(self):
+        s = self._selected()
+        if not s:
+            return
+        dialog = ServerOptionsDialog(self, s)
+        self._children.append(dialog)
+        dialog.show()
+
+    def _share(self):
+        s = self._selected()
+        if not s:
+            return
+        dialog = ServerShareDialog(self, s)
+        self._children.append(dialog)
+        dialog.show()
+
+    def _delete(self):
+        s = self._selected()
+        if not s:
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                "Delete '%s'?\n\nThe world, backups and all server files will be removed. "
+                "This cannot be undone." % s["name"], parent=self.win):
+            return
+        self._run_bg(lambda: self.app.server_manager.remove(s),
+                     lambda _r: self.status.configure(text="Server %s deleted." % s["name"]),
+                     "Deleting %s ..." % s["name"])
+
+    def _open_root(self):
+        root = servers.servers_root(self.app.settings["game_dir"])
+        os.makedirs(root, exist_ok=True)
+        open_path(root)
+
+    def _close(self):
+        if self._poll_id and self.win:
+            try:
+                self.win.after_cancel(self._poll_id)
+            except tk.TclError:
+                pass
+        for child in self._children:
+            try:
+                if child.win and child.win.winfo_exists():
+                    child.win.destroy()
+            except tk.TclError:
+                pass
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
+class ServerCreateDialog:
+    """New-server form: version, software, memory, port and EULA."""
+
+    def __init__(self, hoster: ServerHosterDialog):
+        self.hoster = hoster
+        self.app = hoster.app
+        self.win = None
+        self.cancel_event = threading.Event()
+        self._creating = False
+        self._progress: queue.Queue = queue.Queue()
+        self._progress_job = None
+
+    def show(self):
+        app = self.app
+        manifest = app.manifest or install.cached_manifest() or {}
+        versions = [v["id"] for v in manifest.get("versions", [])
+                    if v.get("type") == "release"]
+        if not versions:
+            versions = [app.settings.get("last_version") or "26.3"]
+        current = app.settings.get("last_version") or versions[0]
+        if current not in versions:
+            current = versions[0]
+
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("XI Server Hoster - new server")
+        win.configure(bg=BG)
+        win.geometry("620x650")
+        win.minsize(580, 600)
+        win.transient(self.hoster.win)
+        win.grab_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=16, pady=(14, 4))
+        ttk.Label(head, text="NEW SERVER", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  downloads the official server jar", style="Sub.TLabel").pack(
+            side="left", pady=(6, 0))
+
+        form = ttk.Frame(win, style="Panel.TFrame", padding=16)
+        form.pack(fill="both", expand=True, padx=16, pady=(8, 0))
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
+
+        self.name_var = tk.StringVar(value="My XI Server")
+        self.version_var = tk.StringVar(value=current)
+        self.software_var = tk.StringVar(value="Vanilla")
+        self.ram_var = tk.StringVar(value="2048")
+        self.port_var = tk.StringVar(value=str(servers.next_free_port()))
+        self.motd_var = tk.StringVar(value="An XI Server")
+        self.players_var = tk.StringVar(value="10")
+        self.difficulty_var = tk.StringVar(value="normal")
+        self.gamemode_var = tk.StringVar(value="survival")
+        self.online_var = tk.BooleanVar(value=True)
+        self.eula_var = tk.BooleanVar(value=False)
+
+        def label(row, col, text):
+            ttk.Label(form, text=text, style="PanelDim.TLabel",
+                      font=("Segoe UI Semibold", 8)).grid(
+                row=row, column=col, sticky="w", padx=(0 if col == 0 else 14, 0),
+                pady=(0, 3))
+
+        label(0, 0, "SERVER NAME")
+        name = ttk.Entry(form, textvariable=self.name_var)
+        name.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+
+        label(2, 0, "MINECRAFT VERSION")
+        ttk.Combobox(form, textvariable=self.version_var, values=versions,
+                     state="readonly", width=16).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        label(2, 2, "SOFTWARE")
+        ttk.Combobox(form, textvariable=self.software_var,
+                     values=list(servers.SOFTWARES), state="readonly", width=16).grid(
+            row=3, column=2, columnspan=2, sticky="ew", pady=(0, 10))
+
+        label(4, 0, "SERVER MEMORY (MB)")
+        ttk.Combobox(form, textvariable=self.ram_var,
+                     values=("1024", "2048", "3072", "4096", "6144", "8192"),
+                     state="readonly", width=16).grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        label(4, 2, "PORT")
+        ttk.Entry(form, textvariable=self.port_var).grid(
+            row=5, column=2, columnspan=2, sticky="ew", pady=(0, 10))
+
+        label(6, 0, "MOTD (THE TEXT PLAYERS SEE)")
+        ttk.Entry(form, textvariable=self.motd_var).grid(
+            row=7, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+
+        label(8, 0, "MAX PLAYERS")
+        ttk.Entry(form, textvariable=self.players_var, width=8).grid(
+            row=9, column=0, sticky="w", pady=(0, 10))
+        label(8, 1, "DIFFICULTY")
+        ttk.Combobox(form, textvariable=self.difficulty_var,
+                     values=("peaceful", "easy", "normal", "hard"),
+                     state="readonly", width=12).grid(row=9, column=1, sticky="w", pady=(0, 10))
+        label(8, 2, "GAME MODE")
+        ttk.Combobox(form, textvariable=self.gamemode_var,
+                     values=("survival", "creative", "adventure", "spectator"),
+                     state="readonly", width=12).grid(row=9, column=2, columnspan=2,
+                                                      sticky="ew", pady=(0, 10))
+
+        ttk.Checkbutton(form, text="Online mode (Mojang account checks; recommended)",
+                        variable=self.online_var).grid(
+            row=10, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        ttk.Checkbutton(form, text="I accept the Minecraft EULA (%s)" % servers.EULA_URL,
+                        variable=self.eula_var).grid(
+            row=11, column=0, columnspan=4, sticky="w")
+
+        ttk.Label(form, text="Vanilla needs no extra setup. Paper adds plugins and better "
+                             "performance. Fabric runs Fabric mods. The first start also "
+                             "downloads a matching Java runtime if needed.",
+                  style="PanelDim.TLabel", wraplength=540, justify="left").grid(
+            row=12, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+        self.progress = ttk.Progressbar(win, mode="indeterminate")
+        self.progress.pack(fill="x", padx=16, pady=(10, 0))
+        self.status = ttk.Label(win, text="Ready to create. The jar is about 50-60 MB.",
+                                style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=16, pady=(6, 0))
+
+        buttons = ttk.Frame(win, style="TFrame")
+        buttons.pack(fill="x", padx=16, pady=(8, 14))
+        ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side="right")
+        self.create_btn = ttk.Button(buttons, text="Create server",
+                                     style="Accent.TButton", command=self._create)
+        self.create_btn.pack(side="right", padx=(0, 8))
+        win.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _create(self):
+        if self._creating:
+            return
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showinfo(APP_NAME, "Give the server a name.", parent=self.win)
+            return
+        if not self.eula_var.get():
+            messagebox.showinfo(
+                APP_NAME, "Tick the EULA box first. Minecraft will not start a server "
+                          "until its EULA is accepted.", parent=self.win)
+            return
+        try:
+            port = int(float(self.port_var.get().strip() or "0"))
+            ram = int(float(self.ram_var.get().strip() or "2048"))
+            players = int(float(self.players_var.get().strip() or "10"))
+        except ValueError:
+            messagebox.showinfo(APP_NAME, "Port, memory and player limit must be numbers.",
+                                parent=self.win)
+            return
+        if not servers.port_free(port):
+            messagebox.showinfo(APP_NAME, "Port %d is already in use. Try another one." % port,
+                                parent=self.win)
+            return
+
+        self._creating = True
+        self.cancel_event.clear()
+        self.create_btn.configure(state="disabled", text="Creating ...")
+        self.progress.start(12)
+        self.status.configure(text="Downloading the server jar ...")
+        kwargs = dict(
+            name=name, version=self.version_var.get(),
+            software=self.software_var.get(), ram_mb=ram, port=port,
+            online_mode=bool(self.online_var.get()),
+            motd=self.motd_var.get().strip() or "An XI Server",
+            max_players=max(1, min(100, players)),
+            difficulty=self.difficulty_var.get(),
+            gamemode=self.gamemode_var.get(),
+            eula=True,
+            log=lambda text: self.app.q("log", "[server] " + text),
+            progress=lambda done, total: self._progress.put((done, total)),
+            cancel=self.cancel_event)
+        game_dir = self.app.settings["game_dir"]
+
+        def failed(error):
+            self._creating = False
+            try:
+                self.progress.stop()
+                self.create_btn.configure(state="normal", text="Create server")
+            except tk.TclError:
+                return
+            self.status.configure(text="Could not create the server.")
+            if isinstance(error, Cancelled) or self.cancel_event.is_set():
+                self.status.configure(text="Cancelled - the partial server folder was removed.")
+                return
+            messagebox.showerror(APP_NAME, "Could not create the server:\n\n%s" % error,
+                                 parent=self.win)
+
+        def done(server):
+            self._creating = False
+            try:
+                self.progress.stop()
+            except tk.TclError:
+                pass
+            self._close()
+            self.hoster.refresh()
+            messagebox.showinfo(
+                APP_NAME,
+                "'%s' is ready on port %d.\n\nPress Start, or Join server to start it "
+                "and open Minecraft." % (server["name"], server["port"]),
+                parent=self.hoster.win)
+
+        _background(self.win, lambda: servers.create_server(game_dir, **kwargs), done, failed)
+        self._poll_progress()
+
+    def _poll_progress(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        latest = None
+        try:
+            while True:
+                latest = self._progress.get_nowait()
+        except queue.Empty:
+            pass
+        if latest and self._creating:
+            done, total = latest
+            if total:
+                self.status.configure(text="Downloading server jar: %s / %s" %
+                                           (human_size(done), human_size(total)))
+        if self._creating:
+            self._progress_job = self.win.after(200, self._poll_progress)
+
+    def _cancel(self):
+        if self._creating:
+            self.cancel_event.set()
+            self.status.configure(text="Cancelling after the current chunk ...")
+            return
+        self._close()
+
+    def _close(self):
+        if self._progress_job and self.win:
+            try:
+                self.win.after_cancel(self._progress_job)
+            except tk.TclError:
+                pass
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
+class ServerConsoleDialog:
+    """Live console for one running (or stopped) server."""
+
+    def __init__(self, hoster: ServerHosterDialog, server: dict):
+        self.hoster = hoster
+        self.app = hoster.app
+        self.server = server
+        self.win = None
+        self.text = None
+        self.entry = None
+        self.status = None
+        self._poll_id = None
+        self._seen = 0
+        self._runtime = None
+
+    def show(self):
+        win = tk.Toplevel(self.app.root)
+        self.win = win
+        win.title("XI Server Hoster - %s" % self.server.get("name", "server"))
+        win.configure(bg=BG)
+        win.geometry("900x600")
+        win.minsize(760, 480)
+        win.transient(self.hoster.win)
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=14, pady=(12, 4))
+        ttk.Label(head, text=self.server.get("name", "server").upper(),
+                  style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  %s %s  ·  port %s" % (
+            self.server.get("software", "Vanilla"), self.server.get("version", ""),
+            self.server.get("port", "")), style="Sub.TLabel").pack(
+            side="left", pady=(6, 0))
+        ttk.Button(head, text="Server folder", command=self._open_folder).pack(side="right")
+
+        logf = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        logf.pack(fill="both", expand=True, padx=14, pady=(6, 0))
+        self.text = tk.Text(logf, bg=PANEL2, fg="#c9d6e6", insertbackground=TEXT,
+                           wrap="none", relief="flat", font=("Consolas", 9),
+                           state="disabled")
+        tsb = ttk.Scrollbar(logf, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
+
+        row = ttk.Frame(win, style="TFrame")
+        row.pack(fill="x", padx=14, pady=(8, 0))
+        ttk.Button(row, text="Start", command=lambda: self.hoster._start_server(
+            self.server)).pack(side="left")
+        ttk.Button(row, text="Stop", command=lambda: self.hoster._stop_server(
+            self.server)).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="Save world", command=lambda: self._quick("save-all")).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(row, text="List players", command=lambda: self._quick("list")).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(row, text="Say hello", command=lambda: self._quick("say Hello!")).pack(
+            side="left", padx=(6, 0))
+
+        cmd = ttk.Frame(win, style="TFrame")
+        cmd.pack(fill="x", padx=14, pady=(8, 0))
+        self.entry = ttk.Entry(cmd)
+        self.entry.pack(side="left", fill="x", expand=True)
+        self.entry.bind("<Return>", lambda _e: self._send())
+        ttk.Button(cmd, text="Send", command=self._send).pack(side="left", padx=(8, 0))
+
+        self.status = ttk.Label(win, text="...", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=14, pady=(8, 12))
+
+        win.protocol("WM_DELETE_WINDOW", self._close)
+        self._poll()
+
+    def _append(self, line: str):
+        if not self.text or not self.text.winfo_exists():
+            return
+        self.text.configure(state="normal")
+        self.text.insert("end", line + "\n")
+        try:
+            if int(self.text.index("end-1c").split(".")[0]) > 6000:
+                self.text.delete("1.0", "1500.0")
+        except (tk.TclError, ValueError):
+            pass
+        self.text.see("end")
+        self.text.configure(state="disabled")
+
+    def _poll(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        runtime = self.app.server_manager.runtime(self.server)
+        if runtime is not self._runtime:
+            if self.text:
+                self.text.configure(state="normal")
+                self.text.delete("1.0", "end")
+                self.text.configure(state="disabled")
+            self._runtime = runtime
+            self._seen = 0
+        snap = runtime.snapshot() if runtime else None
+        if snap:
+            total = snap.get("line_total", 0)
+            if total < self._seen:
+                self._seen = 0
+            if total > self._seen:
+                new = list(snap.get("lines", []))[-(total - self._seen):]
+                for line in new:
+                    self._append(line)
+                self._seen = total
+            state = {"starting": "Starting", "running": "Running",
+                     "stopping": "Stopping", "stopped": "Stopped",
+                     "crashed": "Crashed"}.get(snap.get("state"), snap.get("state", "?"))
+            address = "127.0.0.1:%d" % int(self.server.get("port") or 25565)
+            self.status.configure(text="%s  ·  %d/%d players  ·  %s" % (
+                state, snap.get("player_count", 0), snap.get("max_players", 0), address))
+            if snap.get("error"):
+                self.status.configure(text="%s  ·  %s" % (state, snap["error"]))
+        else:
+            self.status.configure(text="Stopped  ·  press Start to launch this server")
+        self._poll_id = self.win.after(400, self._poll)
+
+    def _send(self):
+        if not self.entry:
+            return
+        command = self.entry.get().strip()
+        if not command:
+            return
+        runtime = self.app.server_manager.runtime(self.server)
+        if not runtime or not runtime.alive():
+            self.status.configure(text="The server is not running.")
+            return
+        try:
+            runtime.send(command)
+        except Exception as exc:  # noqa: BLE001
+            self.status.configure(text="Could not send command: %s" % exc)
+            return
+        self._append("> " + command)
+        self.entry.delete(0, "end")
+
+    def _quick(self, command):
+        if self.entry:
+            self.entry.delete(0, "end")
+            self.entry.insert(0, command)
+            self._send()
+
+    def _open_folder(self):
+        open_path(self.server["path"])
+
+    def _close(self):
+        if self._poll_id and self.win:
+            try:
+                self.win.after_cancel(self._poll_id)
+            except tk.TclError:
+                pass
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
+class ServerOptionsDialog:
+    """Edit a server's MOTD, player limit, memory and port."""
+
+    def __init__(self, hoster: ServerHosterDialog, server: dict):
+        self.hoster = hoster
+        self.app = hoster.app
+        self.server = server
+        self.win = None
+
+    def show(self):
+        s = self.server
+        win = tk.Toplevel(self.app.root)
+        self.win = win
+        win.title("XI Server Hoster - options")
+        win.configure(bg=BG)
+        win.geometry("560x560")
+        win.minsize(520, 520)
+        win.transient(self.hoster.win)
+        win.grab_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=16, pady=(14, 4))
+        ttk.Label(head, text="SERVER OPTIONS", style="Head.TLabel").pack(side="left")
+
+        form = ttk.Frame(win, style="Panel.TFrame", padding=16)
+        form.pack(fill="both", expand=True, padx=16, pady=(8, 0))
+        form.columnconfigure(1, weight=1)
+
+        self.name_var = tk.StringVar(value=s.get("name", ""))
+        self.motd_var = tk.StringVar(value=s.get("motd", ""))
+        self.players_var = tk.StringVar(value=str(s.get("max_players", 10)))
+        self.ram_var = tk.StringVar(value=str(s.get("ram_mb", 2048)))
+        self.port_var = tk.StringVar(value=str(s.get("port", 25565)))
+        self.difficulty_var = tk.StringVar(value=s.get("difficulty", "normal"))
+        self.gamemode_var = tk.StringVar(value=s.get("gamemode", "survival"))
+        self.online_var = tk.BooleanVar(value=bool(s.get("online_mode", True)))
+
+        rows = [
+            ("NAME", ttk.Entry(form, textvariable=self.name_var)),
+            ("MOTD", ttk.Entry(form, textvariable=self.motd_var)),
+            ("MAX PLAYERS", ttk.Entry(form, textvariable=self.players_var)),
+            ("MEMORY (MB)", ttk.Combobox(form, textvariable=self.ram_var,
+                                         values=("1024", "2048", "3072", "4096",
+                                                 "6144", "8192"), state="readonly")),
+            ("PORT", ttk.Entry(form, textvariable=self.port_var)),
+            ("DIFFICULTY", ttk.Combobox(form, textvariable=self.difficulty_var,
+                                        values=("peaceful", "easy", "normal", "hard"),
+                                        state="readonly")),
+            ("GAME MODE", ttk.Combobox(form, textvariable=self.gamemode_var,
+                                       values=("survival", "creative", "adventure",
+                                               "spectator"), state="readonly")),
+        ]
+        for i, (text, widget) in enumerate(rows):
+            ttk.Label(form, text=text, style="PanelDim.TLabel",
+                      font=("Segoe UI Semibold", 8)).grid(
+                row=i, column=0, sticky="w", padx=(0, 14), pady=(0, 10))
+            widget.grid(row=i, column=1, sticky="ew", pady=(0, 10))
+
+        ttk.Checkbutton(form, text="Online mode (Mojang account checks)",
+                        variable=self.online_var).grid(
+            row=len(rows), column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        self.status = ttk.Label(win, text="Changes to port, memory or online mode apply "
+                                          "after a restart.", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=16, pady=(8, 0))
+
+        buttons = ttk.Frame(win, style="TFrame")
+        buttons.pack(fill="x", padx=16, pady=(10, 14))
+        ttk.Button(buttons, text="Cancel", command=self._close).pack(side="right")
+        ttk.Button(buttons, text="Save", style="Accent.TButton",
+                   command=self._save).pack(side="right", padx=(0, 8))
+        win.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _save(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showinfo(APP_NAME, "The server needs a name.", parent=self.win)
+            return
+        try:
+            players = max(1, min(100, int(float(self.players_var.get() or "10"))))
+            ram = int(float(self.ram_var.get() or "2048"))
+            port = int(float(self.port_var.get() or "25565"))
+        except ValueError:
+            messagebox.showinfo(APP_NAME, "Players, memory and port must be numbers.",
+                                parent=self.win)
+            return
+        if not (1024 <= ram <= 16384):
+            messagebox.showinfo(APP_NAME, "Server memory must be between 1024 and 16384 MB.",
+                                parent=self.win)
+            return
+        runtime, _snap, _state = self.hoster._state(self.server)
+        running = bool(runtime and runtime.alive())
+        if port != int(self.server.get("port") or 25565) and not servers.port_free(port):
+            messagebox.showinfo(APP_NAME, "Port %d is already in use." % port,
+                                parent=self.win)
+            return
+        self.server.update({
+            "name": name,
+            "motd": self.motd_var.get().strip()[:120] or "An XI Server",
+            "max_players": players,
+            "ram_mb": ram,
+            "port": port,
+            "difficulty": self.difficulty_var.get(),
+            "gamemode": self.gamemode_var.get(),
+            "online_mode": bool(self.online_var.get()),
+        })
+        servers.apply_properties(self.server)
+        servers.save_server(self.server)
+        self.hoster.refresh()
+        self._close()
+        if running:
+            self.hoster.status.configure(
+                text="Saved. Restart %s to apply port, memory or online-mode changes." % name)
+        else:
+            self.hoster.status.configure(text="Saved options for %s." % name)
+
+    def _close(self):
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
+class ServerBackupsDialog:
+    """List, create, restore and delete world backups for one server."""
+
+    def __init__(self, hoster: ServerHosterDialog, server: dict):
+        self.hoster = hoster
+        self.app = hoster.app
+        self.server = server
+        self.win = None
+        self.tree = None
+        self.status = None
+        self.items: list = []
+
+    def show(self):
+        win = tk.Toplevel(self.app.root)
+        self.win = win
+        win.title("XI Server Hoster - backups")
+        win.configure(bg=BG)
+        win.geometry("760x500")
+        win.minsize(680, 420)
+        win.transient(self.hoster.win)
+        win.grab_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=16, pady=(14, 4))
+        ttk.Label(head, text="BACKUPS", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  %s" % self.server.get("name", "server"),
+                  style="Sub.TLabel").pack(side="left", pady=(6, 0))
+        ttk.Button(head, text="Back up now", style="Accent.TButton",
+                   command=self._create).pack(side="right")
+
+        wrap = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        wrap.pack(fill="both", expand=True, padx=16, pady=(8, 0))
+        self.tree = ttk.Treeview(wrap, columns=("name", "date", "size"),
+                                 show="headings", style="Mods.Treeview",
+                                 selectmode="browse")
+        for col, text, width, anchor in (("name", "BACKUP", 420, "w"),
+                                          ("date", "CREATED", 170, "w"),
+                                          ("size", "SIZE", 100, "e")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
+        tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        acts = ttk.Frame(win, style="TFrame")
+        acts.pack(fill="x", padx=16, pady=(10, 0))
+        ttk.Button(acts, text="Restore selected", command=self._restore).pack(side="left")
+        ttk.Button(acts, text="Delete", command=self._delete).pack(side="left", padx=(8, 0))
+        ttk.Button(acts, text="Backups folder", command=self._open_folder).pack(
+            side="right")
+
+        self.status = ttk.Label(win, text="", style="Sub.TLabel")
+        self.status.pack(anchor="w", padx=16, pady=(8, 12))
+        win.protocol("WM_DELETE_WINDOW", self._close)
+        self._refresh()
+
+    def _refresh(self):
+        if not self.win or not self.win.winfo_exists():
+            return
+        self.items = servers.list_backups(self.server)
+        self.tree.delete(*self.tree.get_children())
+        for item in self.items:
+            stamp = datetime.fromtimestamp(item["modified"]).strftime("%d %b %Y  %H:%M")
+            self.tree.insert("", "end", iid=item["name"],
+                             values=(item["name"], stamp, human_size(item["size"])))
+        self.status.configure(text="%d backup%s  ·  %s" % (
+            len(self.items), "" if len(self.items) == 1 else "s",
+            "Restoring keeps the current world as a safety copy."
+            if self.items else "No backups yet - press Back up now."))
+
+    def _selected(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo(APP_NAME, "Pick a backup first.", parent=self.win)
+            return None
+        for item in self.items:
+            if item["name"] == selection[0]:
+                return item
+        return None
+
+    def _create(self):
+        runtime = self.app.server_manager.runtime(self.server)
+        self.status.configure(text="Backing up the world ...")
+
+        def done(path):
+            self._refresh()
+            self.status.configure(text="Backup ready: %s" % os.path.basename(path))
+
+        _background(self.win, lambda: servers.create_backup_safe(self.server, runtime),
+                    done, lambda exc: self._failed(exc))
+
+    def _restore(self):
+        item = self._selected()
+        if not item:
+            return
+        runtime = self.app.server_manager.runtime(self.server)
+        if runtime and runtime.alive():
+            messagebox.showinfo(APP_NAME, "Stop the server before restoring a backup.",
+                                parent=self.win)
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                "Restore %s?\n\nThe current world is kept as a safety copy "
+                "(world.before-restore-...)." % item["name"], parent=self.win):
+            return
+        self.status.configure(text="Restoring %s ..." % item["name"])
+
+        def done(_world):
+            self.status.configure(text="World restored from %s." % item["name"])
+            messagebox.showinfo(APP_NAME, "World restored. Start the server to play it.",
+                                parent=self.win)
+
+        _background(self.win, lambda: servers.restore_backup(self.server, item["path"]),
+                    done, lambda exc: self._failed(exc))
+
+    def _delete(self):
+        item = self._selected()
+        if not item:
+            return
+        if not messagebox.askyesno(APP_NAME, "Delete backup %s?" % item["name"],
+                                   parent=self.win):
+            return
+        try:
+            os.remove(item["path"])
+        except OSError as exc:
+            self._failed(exc)
+            return
+        self._refresh()
+
+    def _failed(self, error):
+        self.status.configure(text="Failed: %s" % error)
+        messagebox.showerror(APP_NAME, str(error), parent=self.win)
+
+    def _open_folder(self):
+        root = servers.backup_folder(self.server)
+        os.makedirs(root, exist_ok=True)
+        open_path(root)
+
+    def _close(self):
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
+class ServerShareDialog:
+    """LAN / internet addresses and an optional UPnP port-forward attempt."""
+
+    def __init__(self, hoster: ServerHosterDialog, server: dict):
+        self.hoster = hoster
+        self.app = hoster.app
+        self.server = server
+        self.win = None
+        self.public_lbl = None
+        self.status = None
+        self._port = int(server.get("port") or 25565)
+        self._lan = servers.lan_ip()
+
+    def show(self):
+        win = tk.Toplevel(self.app.root)
+        self.win = win
+        win.title("XI Server Hoster - share")
+        win.configure(bg=BG)
+        win.geometry("620x500")
+        win.minsize(560, 460)
+        win.transient(self.hoster.win)
+        win.grab_set()
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=16, pady=(14, 4))
+        ttk.Label(head, text="SHARE THIS SERVER", style="Head.TLabel").pack(side="left")
+
+        panel = ttk.Frame(win, style="Panel.TFrame", padding=16)
+        panel.pack(fill="both", expand=True, padx=16, pady=(8, 0))
+        panel.columnconfigure(1, weight=1)
+
+        rows = [
+            ("On this PC", "127.0.0.1:%d" % self._port),
+            ("Same Wi-Fi / LAN", "%s:%d" % (self._lan, self._port)),
+        ]
+        for i, (label, value) in enumerate(rows):
+            ttk.Label(panel, text=label.upper(), style="PanelDim.TLabel",
+                      font=("Segoe UI Semibold", 8)).grid(
+                row=i, column=0, sticky="w", padx=(0, 16), pady=(0, 10))
+            ttk.Label(panel, text=value, style="Panel.TLabel",
+                      font=("Consolas", 11)).grid(row=i, column=1, sticky="w", pady=(0, 10))
+
+        ttk.Label(panel, text="INTERNET", style="PanelDim.TLabel",
+                  font=("Segoe UI Semibold", 8)).grid(
+            row=2, column=0, sticky="w", padx=(0, 16), pady=(0, 10))
+        self.public_lbl = ttk.Label(panel, text="checking public IP ...",
+                                    style="Panel.TLabel", font=("Consolas", 11))
+        self.public_lbl.grid(row=2, column=1, sticky="w", pady=(0, 10))
+
+        ttk.Label(panel, text="Friends on the same Wi-Fi can use the LAN address. For "
+                              "internet play, TCP port %d must be forwarded on the router "
+                              "(or use UPnP below). The server only stays online while this "
+                              "PC and the launcher are running." % self._port,
+                  style="PanelDim.TLabel", wraplength=500, justify="left").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 8))
+        ttk.Label(panel, text="Online mode is %s. Friends must own Minecraft and use the "
+                              "same version (%s)." % (
+                                  "on" if self.server.get("online_mode", True) else "OFF",
+                                  self.server.get("version", "")),
+                  style="PanelDim.TLabel", wraplength=500, justify="left").grid(
+            row=4, column=0, columnspan=2, sticky="w")
+
+        acts = ttk.Frame(win, style="TFrame")
+        acts.pack(fill="x", padx=16, pady=(10, 0))
+        ttk.Button(acts, text="Copy LAN address", command=self._copy_lan).pack(side="left")
+        ttk.Button(acts, text="Try UPnP port forward",
+                   command=self._upnp).pack(side="left", padx=(8, 0))
+        ttk.Button(acts, text="Close", command=self._close).pack(side="right")
+
+        self.status = ttk.Label(win, text="", style="Sub.TLabel", wraplength=570,
+                                justify="left")
+        self.status.pack(anchor="w", padx=16, pady=(8, 12))
+        win.protocol("WM_DELETE_WINDOW", self._close)
+
+        def done(ip):
+            if self.win and self.win.winfo_exists():
+                self.public_lbl.configure(text=("%s:%d" % (ip, self._port)) if ip
+                                          else "public IP unavailable")
+
+        _background(self.win, servers.public_ip, done,
+                    lambda _exc: done("") if self.win and self.win.winfo_exists() else None)
+
+    def _copy_lan(self):
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append("%s:%d" % (self._lan, self._port))
+            self.status.configure(text="LAN address copied. Friends on this Wi-Fi can "
+                                        "add it as a server.")
+        except tk.TclError:
+            pass
+
+    def _upnp(self):
+        self.status.configure(text="Asking the router for a port mapping ...")
+
+        def done(ok):
+            if not self.win or not self.win.winfo_exists():
+                return
+            self.status.configure(
+                text=("Router accepted the mapping. Try the internet address above."
+                      if ok else
+                      "No automatic mapping. Forward TCP port %d to %s in the router "
+                      "settings, or use a VPN such as Tailscale/ZeroTier." %
+                      (self._port, self._lan)))
+
+        _background(self.win, lambda: servers.try_upnp(self._port, self._lan),
+                    done, lambda exc: self.status.configure(text="UPnP failed: %s" % exc))
+
+    def _close(self):
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
 class SettingsDialog:
     def __init__(self, app: App):
         self.app = app
@@ -2323,7 +3543,7 @@ def main():
     except Exception:  # noqa: BLE001
         pass
     app = App(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: (app.game.stop() if app.game else None, root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", app.shutdown)
     root.mainloop()
 
 

@@ -1,4 +1,4 @@
-"""SAXIC Launcher - command line helper (same engine as the desktop app).
+"""XI Launcher - command line helper (same engine as the desktop app).
 
     python saxic_cli.py status
     python saxic_cli.py install 26.3

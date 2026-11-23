@@ -44,7 +44,8 @@ def main(argv=None):
 
     if "--dialogs" in argv:
         print("--- extra dialogs ---")
-        for cls in (sl.WorldsDialog, sl.ScreenshotsDialog, sl.NewsDialog):
+        for cls in (sl.WorldsDialog, sl.ScreenshotsDialog, sl.NewsDialog,
+                    sl.ServerHosterDialog):
             dlg = cls(app)
             dlg.show()
             for _ in range(15):
@@ -60,6 +61,25 @@ def main(argv=None):
         sl.SettingsDialog(app).show()
         root.update()
         print("SettingsDialog    : opened and closed")
+
+        print("--- server hoster forms ---")
+        hoster = sl.ServerHosterDialog(app)
+        hoster.show()
+        root.update()
+        print("ServerHosterDialog: %d server row(s), %s" % (
+            len(hoster.tree.get_children()), hoster.status.cget("text")[:70]))
+        create = sl.ServerCreateDialog(hoster)
+        create.show()
+        root.update()
+        print("ServerCreateDialog: version %s, port %s, software %s" % (
+            create.version_var.get(), create.port_var.get(),
+            create.software_var.get()))
+        if not (create.version_var.get() and create.port_var.get().isdigit()):
+            print("RESULT: GUI SMOKE FAILED (server form)")
+            return 1
+        create._close()
+        hoster._close()
+        root.update()
 
     credits = sl.credits_info()
     print("credits    :", credits["created"], "|", credits["updated"], "|",

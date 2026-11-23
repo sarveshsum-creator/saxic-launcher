@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title SAXIC Launcher - GitHub setup
+title XI Launcher - GitHub setup
 cd /d "%~dp0"
 
 set "GH=C:\Program Files\GitHub CLI\gh.exe"
@@ -9,7 +9,7 @@ if not exist "%GH%" set "GH=gh"
 if not exist "%GIT%" set "GIT=git"
 
 echo ============================================================
-echo  SAXIC Launcher - publish to GitHub
+echo  XI Launcher - publish to GitHub
 echo ============================================================
 echo.
 echo A browser window will open. Sign in to GitHub (create a free
@@ -43,14 +43,14 @@ echo.
 echo Signed in as: %USER%
 echo.
 
-"%GH%" repo view "%USER%/saxic-launcher" >nul 2>nul
+"%GH%" repo view "%USER%/xi-launcher" >nul 2>nul
 if errorlevel 1 (
-  echo Creating public repository %USER%/saxic-launcher ...
-  "%GH%" repo create saxic-launcher --public --description "SAXIC Launcher - an original Minecraft launcher for Windows" --source=. --remote=origin --push
+  echo Creating public repository %USER%/xi-launcher ...
+  "%GH%" repo create xi-launcher --public --description "XI Launcher - an original Minecraft launcher and server hoster for Windows" --source=. --remote=origin --push
 ) else (
   echo Repository already exists, pushing to it ...
   "%GIT%" remote remove origin >nul 2>nul
-  "%GIT%" remote add origin https://github.com/%USER%/saxic-launcher.git
+  "%GIT%" remote add origin https://github.com/%USER%/xi-launcher.git
   "%GIT%" push -u origin main
 )
 
@@ -64,7 +64,7 @@ if errorlevel 1 (
 echo.
 echo ============================================================
 echo  DONE. Download link:
-echo  https://github.com/%USER%/saxic-launcher/releases/latest
+echo  https://github.com/%USER%/xi-launcher/releases/latest
 echo.
 echo  The first build takes 1-3 minutes. Refresh that page.
 echo ============================================================

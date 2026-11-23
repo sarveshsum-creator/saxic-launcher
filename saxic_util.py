@@ -1,6 +1,6 @@
-"""SAXIC Launcher - shared helpers (networking, hashing, zip, rules).
+"""XI Launcher - shared helpers (networking, hashing, zip, rules).
 
-Original code written for the SAXIC Launcher project. No third-party
+Original code written for the XI Launcher project. No third-party
 launcher code is used or copied; everything here talks to Mojang's public
 metadata/download endpoints the same way any launcher must.
 
@@ -30,7 +30,7 @@ RUNTIME_MANIFESTS = [
     "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json",
     "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json",
 ]
-USER_AGENT = "SAXICLauncher/1.0 (+https://example.invalid/saxic)"
+USER_AGENT = "XILauncher/1.1 (+https://github.com/sarveshsum-creator/xi-launcher)"
 
 
 # --------------------------------------------------------------------------
@@ -47,8 +47,15 @@ def app_dir() -> str:
 def data_dir() -> str:
     """Writable folder for settings.json and the version-list cache."""
     if getattr(sys, "frozen", False):
-        root = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
-                            "SAXIC Launcher")
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        root = os.path.join(base, "XI Launcher")
+        old = os.path.join(base, "SAXIC Launcher")
+        if not os.path.isdir(root) and os.path.isdir(old):
+            # Keep settings when upgrading from the old product name.
+            try:
+                shutil.copytree(old, root)
+            except OSError:
+                return old
         try:
             os.makedirs(root, exist_ok=True)
         except OSError:
@@ -342,6 +349,17 @@ def sha1_file(path: str, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def sha256_file(path: str, chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            b = fh.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
 def _looks_like_ssl_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return isinstance(exc, ssl.SSLError) or "certificate" in text or "ssl" in text
@@ -367,36 +385,44 @@ def _curl_download(url: str, dest: str) -> bool:
 
 
 def download(url: str, dest: str, sha1: str | None = None, size: int | None = None,
-             progress=None, cancel=None, retries: int = 3, fast: bool = False) -> str:
+             progress=None, cancel=None, retries: int = 3, fast: bool = False,
+             sha256: str | None = None) -> str:
     """Download to ``dest``; skip when the hash already matches.
 
     ``progress(done_bytes, total_bytes)`` is called while streaming and
-    ``cancel()`` may raise Cancelled at any time.
+    ``cancel()`` may raise Cancelled at any time. Either SHA-1 or SHA-256 can
+    be supplied for verification.
 
     ``fast=True`` accepts an existing file when its size matches, without
     re-reading it to compute SHA-1. Used when launching a version that was
     already fully verified, so pressing PLAY does not re-hash ~600 MB.
     """
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-    if not sha1 and os.path.isfile(dest) and os.path.getsize(dest) > 0:
+    if not sha1 and not sha256 and os.path.isfile(dest) and os.path.getsize(dest) > 0:
         # Maven-style artifacts (Fabric loader libraries) publish no hash in
         # the launcher profile. Once the file is there, keep it.
         return dest
-    if sha1 and os.path.isfile(dest) and size is not None and os.path.getsize(dest) == size:
+    if (sha1 or sha256) and os.path.isfile(dest) and size is not None and os.path.getsize(dest) == size:
         if fast:
             if progress:
                 progress(size, size)
             return dest
         try:
-            if sha1_file(dest) == sha1:
+            if sha1 and sha1_file(dest) == sha1:
+                if progress:
+                    progress(size, size)
+                return dest
+            if sha256 and sha256_file(dest) == sha256:
                 if progress:
                     progress(size, size)
                 return dest
         except OSError:
             pass
-    elif sha1 and os.path.isfile(dest) and size is None:
+    elif (sha1 or sha256) and os.path.isfile(dest) and size is None:
         try:
-            if sha1_file(dest) == sha1:
+            if sha1 and sha1_file(dest) == sha1:
+                return dest
+            if sha256 and sha256_file(dest) == sha256:
                 return dest
         except OSError:
             pass
@@ -435,6 +461,8 @@ def download(url: str, dest: str, sha1: str | None = None, size: int | None = No
                     progress(got, size or got)
             if sha1 and sha1_file(tmp) != sha1:
                 raise IOError("hash mismatch for " + url)
+            if sha256 and sha256_file(tmp) != sha256:
+                raise IOError("sha256 mismatch for " + url)
             os.replace(tmp, dest)
             return dest
         except Cancelled:
