@@ -1,7 +1,7 @@
 """XI Launcher - XI Server Hoster.
 
-An original, local Minecraft server manager: create a Vanilla, Paper or
-Fabric server in one window, start/stop it, watch the console, change the
+An original, local Minecraft server manager: create a Vanilla, Paper,
+Fabric or Bedrock server in one window, start/stop it, watch the console, change the
 MOTD and player limit, make backups, and share the address with friends on
 the same network (with an optional UPnP port-forward attempt for internet
 play).
@@ -32,16 +32,27 @@ from datetime import datetime
 from xml.etree import ElementTree
 
 import saxic_install as install
-from saxic_util import (Cancelled, data_dir, download, http_json, human_size,
-                        os_name)
+from saxic_util import (BROWSER_USER_AGENT, Cancelled, data_dir, download, http_json,
+                        human_size, os_name)
 
-SOFTWARES = ("Vanilla", "Paper", "Fabric")
+SOFTWARES = ("Vanilla", "Paper", "Fabric", "Bedrock")
+JAVA_SOFTWARES = ("Vanilla", "Paper", "Fabric")
 DEFAULT_PORT = 25565
+BEDROCK_PORT = 19132
 EULA_URL = "https://aka.ms/MinecraftEULA"
 PAPER_API = "https://fill.papermc.io/v3/projects/paper"
 FABRIC_META = "https://meta.fabricmc.net/v2"
+BEDROCK_LINKS = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links"
+BEDROCK_EXE = "bedrock_server.exe"
 META_FILE = "server.json"
 MANAGER_VERSION = 1
+# RakNet "unconnected ping" magic used by every Bedrock server.
+BEDROCK_MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
+
+
+def is_bedrock(server: dict) -> bool:
+    """True when this server runs Minecraft Bedrock Edition (BDS)."""
+    return (server.get("software") or "").strip().lower() == "bedrock"
 
 
 # --------------------------------------------------------------------------
@@ -130,9 +141,10 @@ def save_server(server: dict) -> None:
     _write_json(_meta_path(server["path"]), data)
 
 
-def port_free(port: int) -> bool:
+def port_free(port: int, udp: bool = False) -> bool:
+    kind = socket.SOCK_DGRAM if udp else socket.SOCK_STREAM
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        with socket.socket(socket.AF_INET, kind) as sock:
             # No SO_REUSEADDR on purpose: Windows otherwise lets a second
             # socket bind a port that a server is already listening on.
             sock.bind(("0.0.0.0", int(port)))
@@ -141,9 +153,25 @@ def port_free(port: int) -> bool:
         return False
 
 
-def next_free_port(start: int = DEFAULT_PORT) -> int:
+def next_free_port(start: int = DEFAULT_PORT, udp: bool = False) -> int:
     for port in range(int(start), int(start) + 200):
-        if port_free(port):
+        if port_free(port, udp=udp):
+            return port
+    return int(start)
+
+
+def bedrock_port_free(port: int) -> bool:
+    """True when a Bedrock (NetherNet) server can own that port.
+
+    The NetherNet transport opens a TCP signaling socket on ``server-port``
+    and negotiates UDP for gameplay, so both must be free.
+    """
+    return port_free(port) and port_free(port, udp=True)
+
+
+def next_free_bedrock_port(start: int = BEDROCK_PORT) -> int:
+    for port in range(int(start), int(start) + 200):
+        if bedrock_port_free(port):
             return port
     return int(start)
 
@@ -265,13 +293,50 @@ def default_properties(server: dict) -> dict:
     }
 
 
+def bedrock_default_properties(server: dict) -> dict:
+    """Properties for the Bedrock Dedicated Server (BDS).
+
+    BDS uses ``server-name`` instead of ``motd`` and keeps its worlds under a
+    ``worlds/`` folder, but the rest of the settings have familiar names.
+    """
+    return {
+        "server-name": str(server.get("motd") or "An XI Server").replace("\n", " ")[:120],
+        "server-port": int(server.get("port") or BEDROCK_PORT),
+        "server-portv6": int(server.get("port") or BEDROCK_PORT) + 1,
+        # BDS 1.26 uses "nethernet" (WebRTC): it listens on a TCP signaling
+        # socket on server-port and then negotiates a UDP link per client.
+        # That is the transport current Bedrock clients speak, so we keep it.
+        "transport": "nethernet",
+        "server-udp-ports": int(server.get("port") or BEDROCK_PORT),
+        "online-mode": "true" if server.get("online_mode", True) else "false",
+        "max-players": int(server.get("max_players") or 10),
+        "difficulty": str(server.get("difficulty") or "normal"),
+        "gamemode": str(server.get("gamemode") or "survival"),
+        "level-name": "Bedrock level",
+        "view-distance": 10,
+        "tick-distance": 4,
+        "player-idle-timeout": 30,
+        "allow-cheats": "false",
+        "allow-list": "false",
+        "enable-lan-visibility": "true",
+        "compression-threshold": 1,
+        "default-player-permission-level": "member",
+        "texturepack-required": "false",
+    }
+
+
 def apply_properties(server: dict) -> None:
-    update_properties(_properties_path(server), default_properties(server))
+    if is_bedrock(server):
+        update_properties(_properties_path(server), bedrock_default_properties(server))
+    else:
+        update_properties(_properties_path(server), default_properties(server))
 
 
 def world_dir(server: dict) -> str:
     props = read_properties(_properties_path(server))
-    name = props.get("level-name") or "world"
+    name = props.get("level-name") or ("Bedrock level" if is_bedrock(server) else "world")
+    if is_bedrock(server):
+        return os.path.join(server["path"], "worlds", name)
     return os.path.join(server["path"], name)
 
 
@@ -341,8 +406,61 @@ def resolve_server_jar(version: str, software: str):
     return _vanilla_server(version)
 
 
+def bedrock_download():
+    """Return ``(url, version)`` for the latest Windows Bedrock server build."""
+    data = http_json(BEDROCK_LINKS, timeout=25)
+    links = ((data or {}).get("result") or {}).get("links") or []
+    for link in links:
+        if isinstance(link, dict) and link.get("downloadType") == "serverBedrockWindows":
+            url = link.get("downloadUrl") or ""
+            match = re.search(r"bedrock-server-([0-9][0-9.]*)\.zip", url)
+            version = match.group(1) if match else url.rsplit("/", 1)[-1]
+            return url, version
+    raise RuntimeError("Microsoft's download list did not include a Windows Bedrock server.")
+
+
+def _extract_bedrock(zip_path: str, dest: str) -> None:
+    """Unpack a BDS zip, keeping any settings the user already has."""
+    keep = {}
+    for name in ("server.properties", "allowlist.json", "permissions.json"):
+        path = os.path.join(dest, name)
+        if os.path.isfile(path):
+            with open(path, "rb") as fh:
+                keep[name] = fh.read()
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(dest)
+    for name, blob in keep.items():
+        with open(os.path.join(dest, name), "wb") as fh:
+            fh.write(blob)
+
+
+def install_bedrock_server(server: dict, log=print, progress=None, cancel=None) -> None:
+    """Download and unpack the Bedrock Dedicated Server (no Java needed)."""
+    url, version = bedrock_download()
+    log("downloading Bedrock server %s..." % version)
+    fd, tmp_zip = tempfile.mkstemp(prefix="xi-bds-", suffix=".zip")
+    os.close(fd)
+    try:
+        download(url, tmp_zip, progress=progress, cancel=cancel,
+                 user_agent=BROWSER_USER_AGENT)
+        _extract_bedrock(tmp_zip, server["path"])
+    finally:
+        try:
+            os.remove(tmp_zip)
+        except OSError:
+            pass
+    server["jar"] = BEDROCK_EXE
+    server["bedrock_version"] = version
+    server["version"] = version
+    save_server(server)
+    log("Bedrock server ready: %s (%s)" % (version, BEDROCK_EXE))
+
+
 def install_server_jar(server: dict, log=print, progress=None, cancel=None) -> None:
-    """(Re)download the server jar recorded in the server metadata."""
+    """(Re)download the server software recorded in the server metadata."""
+    if is_bedrock(server):
+        install_bedrock_server(server, log=log, progress=progress, cancel=cancel)
+        return
     ver_json, url, filename, extra = resolve_server_jar(
         server["version"], server.get("software") or "Vanilla")
     if not url:
@@ -385,12 +503,19 @@ def create_server(game_dir: str, name: str, version: str, software: str = "Vanil
     software = (software or "Vanilla").strip()
     if software.lower() not in {s.lower() for s in SOFTWARES}:
         raise ValueError("unsupported server software: %s" % software)
-    if not version:
+    bedrock = software.lower() == "bedrock"
+    if not version and not bedrock:
         raise ValueError("pick a Minecraft version")
-    port = int(port or next_free_port())
-    if not port_free(port):
+    version = version or "latest"
+    if not port:
+        port = next_free_bedrock_port() if bedrock else next_free_port()
+    port = int(port)
+    if bedrock:
+        if not bedrock_port_free(port):
+            raise ValueError("port %d is already in use" % port)
+    elif not port_free(port):
         raise ValueError("port %d is already in use" % port)
-    if not (1024 <= int(ram_mb) <= 16384):
+    if not bedrock and not (1024 <= int(ram_mb) <= 16384):
         raise ValueError("server memory must be between 1024 and 16384 MB")
 
     sid = _unique_id(game_dir, slugify(name))
@@ -416,11 +541,11 @@ def create_server(game_dir: str, name: str, version: str, software: str = "Vanil
         "path": path,
     }
     try:
-        for sub in ("logs", "backups", "plugins", "mods"):
+        for sub in ("logs", "backups", "plugins", "mods", "worlds"):
             os.makedirs(os.path.join(path, sub), exist_ok=True)
         write_eula(server, bool(eula))
-        apply_properties(server)
         install_server_jar(server, log=log, progress=progress, cancel=cancel)
+        apply_properties(server)
         save_server(server)
         log("server %s is ready on port %d" % (name, port))
         return server
@@ -464,6 +589,8 @@ def ensure_server_java(server: dict, game_dir: str, log=print) -> str:
 
 
 def server_command(server: dict, java: str) -> list:
+    if is_bedrock(server):
+        return [os.path.join(server["path"], server.get("jar") or BEDROCK_EXE)]
     ram = max(1024, int(server.get("ram_mb") or 2048))
     jar = server.get("jar") or "server.jar"
     return [
@@ -508,7 +635,7 @@ class ServerProcess:
         with self._lock:
             self.lines.append(line)
             self.line_total += 1
-            if "Done (" in line:
+            if "Done (" in line or "Server started." in line:
                 self.state = "running"
                 self.started_at = time.time()
             low = line.lower()
@@ -520,6 +647,14 @@ class ServerProcess:
                 m = re.search(r"\]:\s+([A-Za-z0-9_]{1,16})\s+left the game", line)
                 if m:
                     self.players.discard(m.group(1))
+            elif "player connected:" in low or "player spawned:" in low:
+                m = re.search(r"player (?:connected|spawned):\s+([^,\r\n]+)", line, re.I)
+                if m:
+                    self.players.add(m.group(1).strip())
+            elif "player disconnected:" in low:
+                m = re.search(r"player disconnected:\s+([^,\r\n]+)", line, re.I)
+                if m:
+                    self.players.discard(m.group(1).strip())
             m = re.search(r"There are (\d+) of a max(?: of)? (\d+) players online", line)
             if m:
                 self.max_players = int(m.group(2))
@@ -537,9 +672,11 @@ class ServerProcess:
             return
         if not self.server.get("eula_accepted"):
             raise RuntimeError("Accept the Minecraft EULA before starting this server.")
-        jar = os.path.join(self.server["path"], self.server.get("jar") or "server.jar")
-        if not os.path.isfile(jar):
-            raise RuntimeError("server jar is missing - use Repair / update files")
+        bedrock = is_bedrock(self.server)
+        filename = self.server.get("jar") or (BEDROCK_EXE if bedrock else "server.jar")
+        target = os.path.join(self.server["path"], filename)
+        if not os.path.isfile(target):
+            raise RuntimeError("server files are missing - create the server again")
         self._set_state("starting")
         self._stop_requested = False
         self.error = ""
@@ -547,10 +684,14 @@ class ServerProcess:
             self.lines.clear()
             self.line_total = 0
             self.players.clear()
-        java = ensure_server_java(self.server, self.game_dir, log=self._add_line)
-        cmd = server_command(self.server, java)
+        if bedrock:
+            cmd = server_command(self.server, "")
+        else:
+            java = ensure_server_java(self.server, self.game_dir, log=self._add_line)
+            cmd = server_command(self.server, java)
         env = os.environ.copy()
-        env["JAVA_TOOL_OPTIONS"] = ""
+        if not bedrock:
+            env["JAVA_TOOL_OPTIONS"] = ""
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._add_line("> " + " ".join(cmd))
         self.popen = subprocess.Popen(
@@ -716,9 +857,91 @@ def _read_varint(sock) -> int:
             raise OSError("bad varint")
 
 
+def _bedrock_tcp_open(host: str, port: int, timeout: float) -> bool:
+    """True when something accepts a TCP connection on host:port.
+
+    BDS 1.26's default "nethernet" transport opens a TCP signaling listener
+    on server-port, so this confirms the server is up and reachable even
+    though the old RakNet UDP ping no longer answers.
+    """
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ping_bedrock_raknet(host: str, port: int, timeout: float) -> dict | None:
+    """Classic RakNet unconnected ping (used by BDS with transport=raknet)."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        now = int(time.time() * 1000)
+        packet = b"\x01" + struct.pack(">q", now) + BEDROCK_MAGIC + struct.pack(">q", 0)
+        sock.sendto(packet, (host, int(port)))
+        data, _addr = sock.recvfrom(65535)
+        sock.close()
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        if not data or data[0] != 0x1C:
+            return None
+        offset = 1 + 8 + 8 + len(BEDROCK_MAGIC)
+        length = struct.unpack(">H", data[offset:offset + 2])[0]
+        payload = data[offset + 2:offset + 2 + length].decode("utf-8", "replace")
+        parts = payload.split(";")
+
+        def at(index, default=""):
+            return parts[index] if index < len(parts) else default
+
+        return {
+            "edition": "bedrock",
+            "transport": "raknet",
+            "reachable": True,
+            "motd": at(1),
+            "protocol": at(2),
+            "version": at(3),
+            "players_online": int(at(4, "0") or 0),
+            "players_max": int(at(5, "0") or 0),
+            "level_name": at(7),
+            "gamemode": at(8),
+            "port": at(10),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ping_bedrock(host: str = "127.0.0.1", port: int = BEDROCK_PORT,
+                 timeout: float = 3.0) -> dict | None:
+    """Status of a Bedrock server, or None when it is not reachable.
+
+    Tries the RakNet UDP ping first (BDS built with ``transport=raknet`` and
+    older releases), then falls back to the NetherNet TCP signaling listener
+    that Bedrock's current default transport opens on ``server-port``.
+    """
+    info = _ping_bedrock_raknet(host, port, timeout)
+    if info is not None:
+        return info
+    if _bedrock_tcp_open(host, port, timeout):
+        return {
+            "edition": "bedrock",
+            "transport": "nethernet",
+            "reachable": True,
+            "motd": "",
+            "version": "",
+        }
+    return None
+
+
 def ping_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT,
-                timeout: float = 3.0) -> dict | None:
-    """Return status JSON (players, motd, version) or None."""
+                timeout: float = 3.0, software: str = "") -> dict | None:
+    """Return status JSON (players, motd, version) or None.
+
+    Pass ``software="Bedrock"`` for a Bedrock server; every other value uses
+    the Java Edition server-list ping.
+    """
+    if (software or "").strip().lower() == "bedrock":
+        return ping_bedrock(host, port, timeout)
     try:
         with socket.create_connection((host, int(port)), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -840,6 +1063,7 @@ def restore_backup(server: dict, backup_path: str, log=print) -> str:
             if not folders:
                 raise RuntimeError("this backup has no world folder")
             candidate = os.path.join(tmp, folders[0])
+        os.makedirs(os.path.dirname(world), exist_ok=True)
         shutil.move(candidate, world)
         log("world restored from " + os.path.basename(backup_path))
         return world

@@ -40,7 +40,8 @@ Building the standalone `.exe` yourself: `python build_exe.py` (needs
 | Java | Detects a system JVM, otherwise installs the matching Mojang runtime (`java-runtime-epsilon`, `java-runtime-gamma`, …) into the game folder. |
 | Launch | Builds the real Java command line from the version JSON (modern `arguments` and legacy `minecraftArguments` both supported), streams the game log into the window, and keeps the game running until you close it or press Stop. |
 | Mods | A **Mod library** window searches [Modrinth](https://modrinth.com) for Fabric mods that match the selected Minecraft version, installs them into `mods/`, and can disable/remove them. Installing a mod automatically sets up Fabric and switches **PLAY** to it. |
-| **XI Server Hoster** | Create a **Vanilla, Paper or Fabric** server, download its official jar, accept the EULA, start/stop it, watch a live console, send commands, see who is online, set MOTD/players/difficulty, share the LAN address, try an automatic UPnP port-forward, and make/restore world backups. |
+| **XI Server Hoster** | Create a **Vanilla, Paper, Fabric or Bedrock** server, download its official files, accept the EULA, start/stop it, watch a live console, send commands, see who is online, set MOTD/players/difficulty, and share the server **name and address** (this PC, LAN and public IP). Java server software also gets a matching Java runtime downloaded automatically, an automatic UPnP port-forward attempt, and world backups. |
+| **Bedrock Edition** | The **Bedrock Edition** window detects Minecraft for Windows (the Microsoft Store app), launches it, and lists your Bedrock servers with their name and address. Bedrock has no command line for joining, so the launcher shows the address to paste in *Play → Servers → Add Server*. Creating a Bedrock server runs Microsoft's official **Bedrock Dedicated Server** — a native program that needs no Java. |
 | Worlds | The **Worlds** window lists every singleplayer save with its size and last-played time. Double-click a world (or use *Play world*) to launch straight into it, make a `.zip` backup, restore a backup as a new save, open the folder or delete a world. |
 | Screenshots | The **Screenshots** window shows a thumbnail gallery of everything in `screenshots/`. Click a picture to open it full-size. |
 | News | The **News** window shows the latest stories from Mojang's public launcher feed, with a *Java Edition only* filter and *Read more* links. |
@@ -53,22 +54,28 @@ Building the standalone `.exe` yourself: `python build_exe.py` (needs
 
 Click **Server hoster** in the top bar.
 
-1. **New server** — pick a name, Minecraft version, software (Vanilla / Paper /
-   Fabric), memory, port, MOTD, difficulty and game mode, then tick the
-   Minecraft EULA box. The launcher downloads the official server jar and
-   writes `server.properties` for you.
-2. **Start** — runs a real Java server process. A matching Java runtime is
-   downloaded automatically when needed. The first start also creates the
-   world, which can take a minute.
-3. **Console** — live log, player count and a command prompt (`say`, `list`,
-   `op`, `whitelist`, … all work).
-4. **Join server** — starts the server if necessary, waits for
-   `Done (…)`, then launches Minecraft with
-   `--quickPlayMultiplayer 127.0.0.1:<port>`.
-5. **Share** — shows the address for this PC, the LAN address for friends on
-   the same Wi-Fi, and the public IP. **Try UPnP port forward** asks a
-   compatible router to map the TCP port automatically; otherwise forward the
-   port manually.
+1. **New server** - pick a name, Minecraft version, software (**Vanilla / Paper
+   / Fabric / Bedrock**), memory, port, MOTD, difficulty and game mode, then
+   tick the Minecraft EULA box. The launcher downloads the official server
+   files and writes `server.properties` for you. Choosing **Bedrock** downloads
+   Microsoft's Bedrock Dedicated Server for Windows (no Java required) and
+   switches the port to the Bedrock range (19132).
+2. **Start** - runs a real server process. Java software gets a matching Java
+   runtime downloaded automatically when needed; Bedrock runs the native
+   `bedrock_server.exe`. The first start also creates the world, which can take
+   a minute.
+3. **Console** - live log, player count and a command prompt. Java commands
+   (`say`, `list`, `op`, `whitelist`, ...) work for Java servers; Bedrock's own
+   commands (`kick`, `save`, `allowlist`, `op`, `changesetting`, ...) work for
+   Bedrock servers.
+4. **Join server** - starts the server if necessary, waits for it to come up,
+   then launches Minecraft with `--quickPlayMultiplayer 127.0.0.1:<port>`. For a
+   Bedrock server it launches Bedrock Edition and shows the address, because
+   Bedrock has no command-line join.
+5. **Share** - shows the **server name** followed by the address for this PC,
+   the LAN address for friends on the same Wi-Fi, and the public IP. **Try UPnP
+   port forward** asks a compatible router to map the port automatically;
+   otherwise forward the port manually (TCP for Java, TCP + UDP for Bedrock).
 6. **Back up now / Backups** — zips the world (pausing saves first when the
    server is running) and can restore an older world. The current world is kept
    as a `world.before-restore-…` safety copy.
@@ -82,6 +89,26 @@ PC is on and the launcher is open** — this is a local hoster, not a cloud
 service. Aternos is a separate cloud product with no public API, so XI Server
 Hoster is an original local implementation of the same idea, not a clone or an
 Aternos client.
+
+## Bedrock Edition
+
+Click **Bedrock Edition** in the top bar. This window:
+
+- Detects whether Minecraft for Windows (the Microsoft Store app) is installed
+  and shows its version. If it is missing, **Get it from the Store** opens the
+  Store page.
+- **Launch Bedrock Edition** starts the installed app. Windows only runs the
+  Store copy, so the launcher cannot download or run Bedrock itself, and it
+  never redistributes game files.
+- Lists your **Bedrock servers** with their **name and address** so you can join
+  them. Bedrock has no command-line join, so open Bedrock, go to **Play →
+  Servers → Add Server** and paste the address.
+
+A **Bedrock** server in the XI Server Hoster runs Microsoft's official Bedrock
+Dedicated Server for Windows (`bedrock_server.exe`) from
+`%APPDATA%\.saxic\servers\<server-id>`. It needs no Java, keeps its world under
+a `worlds` folder, and uses Bedrock settings such as `server-name` and the
+Bedrock port (19132). Open **Server hoster** and choose **Bedrock** to make one.
 
 ## Accounts, friends and the Google question
 
@@ -226,10 +253,13 @@ python saxic_guitest.py --play             # also install, launch and verify
 - **Fabric libraries are Maven coordinates.** They are resolved from
   `group:artifact:version` into `group/artifact/version/...jar`.
 - **Server software sources.** Vanilla jars come from Mojang's version JSON,
-  Paper from `fill.papermc.io/v3`, Fabric from `meta.fabricmc.net`. Each jar is
-  hash-checked where the source publishes a hash. `server.properties` is
-  rewritten from the server metadata, and `eula.txt` is only set to true after
-  the EULA checkbox/confirmation.
+  Paper from `fill.papermc.io/v3`, Fabric from `meta.fabricmc.net`, and the
+  Bedrock Dedicated Server from Microsoft's download-links API
+  (`net-secondary.web.minecraft-services.net`). Each jar is hash-checked where
+  the source publishes a hash. `server.properties` is rewritten from the server
+  metadata, and `eula.txt` is only set to true after the EULA
+  checkbox/confirmation. Bedrock uses its own `server.properties` keys
+  (`server-name`, `server-port`, `server-udp-ports`, `transport`).
 - **CDN certificate fallback.** Some CDNs chain to a root that does not ship
   with every Python build's OpenSSL store; downloads retry through Windows'
   `curl.exe` and still verify the published hash.

@@ -242,9 +242,38 @@ def main(argv):
         "backup zip made": os.path.isfile(backup_zip) and "world/level.dat" in zip_names,
         "backup is listed": len(backups) == 1,
         "restore brings the world back": restore_ok,
-        "three server softwares": set(srv.SOFTWARES) == {"Vanilla", "Paper", "Fabric"},
+        "three server softwares": set(srv.SOFTWARES) == {"Vanilla", "Paper", "Fabric", "Bedrock"},
     }
     for name, ok in server_checks.items():
+        print(("PASS " if ok else "FAIL ") + name)
+        fails += 0 if ok else 1
+
+    # Bedrock Edition (offline checks: metadata only, no download)
+    bedrock_server = dict(fake_server)
+    bedrock_server.update({"software": "Bedrock", "port": srv.next_free_port(19140, udp=True),
+                           "jar": srv.BEDROCK_EXE, "version": "1.21.90.3"})
+    srv.write_eula(bedrock_server, True)
+    srv.apply_properties(bedrock_server)
+    bprops = srv.read_properties(os.path.join(server_path, "server.properties"))
+    bworld = srv.world_dir(bedrock_server)
+    bcmd = srv.server_command(bedrock_server, "")
+    bedrock_free = srv.next_free_port(19160, udp=True)
+    while not srv.port_free(bedrock_free):
+        bedrock_free += 1
+    bedrock_checks = {
+        "bedrock detected": srv.is_bedrock(bedrock_server) and not srv.is_bedrock(fake_server),
+        "bedrock port is UDP 19132-family": 19000 < int(bedrock_server["port"]) < 19300,
+        "bedrock properties use server-name": bprops.get("server-name") == "XI test",
+        "bedrock uses the nethernet transport": bprops.get("transport") == "nethernet",
+        "bedrock world under worlds/": os.path.basename(os.path.dirname(bworld)) == "worlds",
+        "bedrock start command runs the exe":
+            bcmd and bcmd[0].lower().endswith("bedrock_server.exe"),
+        "bedrock has a RakNet magic": srv.BEDROCK_MAGIC ==
+            bytes.fromhex("00ffff00fefefefefdfdfdfd12345678"),
+        "bedrock probe on a closed port returns none": srv.ping_bedrock(
+            "127.0.0.1", bedrock_free, timeout=0.4) is None,
+    }
+    for name, ok in bedrock_checks.items():
         print(("PASS " if ok else "FAIL ") + name)
         fails += 0 if ok else 1
     _shutil.rmtree(here_self, ignore_errors=True)

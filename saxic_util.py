@@ -31,6 +31,9 @@ RUNTIME_MANIFESTS = [
     "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json",
 ]
 USER_AGENT = "XILauncher/1.1 (+https://github.com/sarveshsum-creator/xi-launcher)"
+# Some CDNs (minecraft.net's Bedrock downloads) stall a non-browser agent.
+BROWSER_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
 # --------------------------------------------------------------------------
@@ -386,7 +389,7 @@ def _curl_download(url: str, dest: str) -> bool:
 
 def download(url: str, dest: str, sha1: str | None = None, size: int | None = None,
              progress=None, cancel=None, retries: int = 3, fast: bool = False,
-             sha256: str | None = None) -> str:
+             sha256: str | None = None, user_agent: str | None = None) -> str:
     """Download to ``dest``; skip when the hash already matches.
 
     ``progress(done_bytes, total_bytes)`` is called while streaming and
@@ -434,7 +437,8 @@ def download(url: str, dest: str, sha1: str | None = None, size: int | None = No
     for attempt in range(retries):
         try:
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": user_agent or USER_AGENT})
                 with urllib.request.urlopen(req, timeout=60) as r:
                     total = size or int(r.headers.get("Content-Length") or 0)
                     done = 0

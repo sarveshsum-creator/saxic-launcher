@@ -22,6 +22,7 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 import saxic_auth as auth
+import saxic_bedrock as bedrock
 import saxic_install as install
 import saxic_launch as launch
 import saxic_mods as mods
@@ -286,6 +287,8 @@ class App:
         ttk.Label(top, text=APP_NAME.upper(), style="Head.TLabel").pack(side="left", padx=(10, 0))
         ttk.Button(top, text="Server hoster", command=self.open_servers,
                    style="Accent.TButton").pack(side="left", padx=(14, 0))
+        ttk.Button(top, text="Bedrock Edition", command=self.open_bedrock).pack(
+            side="left", padx=(6, 0))
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
         ttk.Button(top, text="Credits", command=self.open_credits).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="News", command=self.open_news).pack(side="right", padx=(0, 8))
@@ -577,6 +580,19 @@ class App:
     def open_servers(self):
         self.server_manager.game_dir = self.settings["game_dir"]
         ServerHosterDialog(self).show()
+
+    def open_bedrock(self):
+        BedrockDialog(self).show()
+
+    def launch_bedrock(self, address: str = "", status=None):
+        """Open Bedrock Edition, optionally after telling the user the address."""
+        try:
+            bedrock.launch()
+            if status is not None:
+                status.configure(text="Starting Bedrock Edition ...  join %s" % address
+                                 if address else "Starting Bedrock Edition ...")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_NAME, str(exc), parent=self.root)
 
     def shutdown(self):
         """Close the launcher cleanly, stopping the game and any servers."""
@@ -1144,15 +1160,18 @@ class ModLibraryDialog:
     def _search(self):
         if self.busy:
             return
+        # Read every Tk variable here, on the main thread; the worker must not
+        # touch Tk (calling var.get() from a thread raises TclError).
         query = self.query_var.get().strip()
         sort = mods.SORTS.get(self.sort_var.get(), "relevance")
+        cat = self.cat_var.get()
+        category = None if cat == "All categories" else cat
         self.status.configure(text="searching Modrinth...")
-        threading.Thread(target=self._search_worker, args=(query, sort), daemon=True).start()
+        threading.Thread(target=self._search_worker,
+                         args=(query, sort, category), daemon=True).start()
 
-    def _search_worker(self, query, sort):
+    def _search_worker(self, query, sort, category):
         try:
-            cat = self.cat_var.get()
-            category = None if cat == "All categories" else cat
             if sort == "featured" or category:
                 if category is None and query == "":
                     # "Featured / all categories" would mean checking ~200
@@ -2110,6 +2129,163 @@ def _background(win, work, done=None, on_error=None):
     win.after(120, poll)
 
 
+class BedrockDialog:
+    """Minecraft: Bedrock Edition - detect it, launch it, show server addresses."""
+
+    def __init__(self, app: App):
+        self.app = app
+        self.win = None
+        self.status = None
+        self.version_lbl = None
+        self.tree = None
+
+    def show(self):
+        app = self.app
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("XI Launcher - Bedrock Edition")
+        win.configure(bg=BG)
+        win.geometry("660x540")
+        win.minsize(580, 480)
+        win.transient(app.root)
+
+        head = ttk.Frame(win, style="TFrame")
+        head.pack(fill="x", padx=16, pady=(14, 4))
+        ttk.Label(head, text="BEDROCK EDITION", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  Minecraft for Windows (Microsoft Store app)",
+                  style="Sub.TLabel").pack(side="left", pady=(6, 0))
+
+        panel = ttk.Frame(win, style="Panel.TFrame", padding=16)
+        panel.pack(fill="x", padx=16, pady=(8, 0))
+        ttk.Label(panel, text="STATUS", style="PanelDim.TLabel",
+                  font=("Segoe UI Semibold", 8)).pack(anchor="w")
+        self.version_lbl = ttk.Label(panel, text="Checking ...", style="Panel.TLabel",
+                                     font=("Segoe UI Semibold", 11))
+        self.version_lbl.pack(anchor="w", pady=(2, 0))
+        btns = ttk.Frame(panel, style="Panel.TFrame")
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Launch Bedrock Edition", style="Accent.TButton",
+                   command=self._launch).pack(side="left")
+        ttk.Button(btns, text="Get it from the Store",
+                   command=bedrock.open_store).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Re-check", command=self._detect).pack(side="left", padx=(8, 0))
+
+        ttk.Label(win, text="BEDROCK SERVERS ON THIS PC", style="Dim.TLabel",
+                  font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=16, pady=(14, 2))
+        gridwrap = ttk.Frame(win, style="Panel.TFrame", padding=1)
+        gridwrap.pack(fill="x", padx=16)
+        self.tree = ttk.Treeview(gridwrap, columns=("name", "address", "state"),
+                                 show="headings", style="Mods.Treeview", height=6,
+                                 selectmode="browse")
+        for col, text, width, anchor in (("name", "SERVER", 190, "w"),
+                                         ("address", "ADDRESS", 200, "w"),
+                                         ("state", "STATE", 110, "w")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
+        self.tree.pack(fill="x")
+        self.tree.bind("<Double-1>", lambda _e: self._copy_address())
+
+        row = ttk.Frame(win, style="TFrame")
+        row.pack(fill="x", padx=16, pady=(8, 0))
+        ttk.Button(row, text="Copy address", command=self._copy_address).pack(side="left")
+        ttk.Button(row, text="Refresh", command=self._refresh).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Server hoster", command=app.open_servers).pack(
+            side="left", padx=(8, 0))
+
+        ttk.Label(win, text="Bedrock has no command line for joining a server, so the launcher "
+                            "shows the address: open Bedrock, tap Play > Servers > Add Server "
+                            "and paste it. Create a Bedrock server in the XI Server Hoster to "
+                            "see it here. Bedrock Edition must be bought in the Microsoft Store; "
+                            "the launcher only starts the copy already on this PC.",
+                  style="Dim.TLabel", wraplength=600, justify="left").pack(
+            anchor="w", padx=16, pady=(10, 0))
+
+        self.status = ttk.Label(win, text="", style="Sub.TLabel", wraplength=600,
+                                justify="left")
+        self.status.pack(anchor="w", padx=16, pady=(8, 12))
+        win.protocol("WM_DELETE_WINDOW", self._close)
+
+        self._refresh()
+        self._detect()
+
+    def _detect(self):
+        self.version_lbl.configure(text="Checking ...")
+        win = self.win
+
+        def work():
+            return bedrock.installed_version(), bedrock.package_folder_exists()
+
+        def done(result):
+            if not win or not win.winfo_exists():
+                return
+            version, folder = result
+            if version:
+                self.version_lbl.configure(text="Installed  ·  version %s" % version)
+            elif folder:
+                self.version_lbl.configure(text="Installed  ·  version unknown")
+            else:
+                self.version_lbl.configure(
+                    text="Not installed  ·  get it from the Microsoft Store")
+
+        _background(win, work, done, lambda _e: done(("", False)))
+
+    def _refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        try:
+            servers_list = self.app.server_manager.servers()
+        except Exception:  # noqa: BLE001
+            servers_list = []
+        lan = servers.lan_ip()
+        count = 0
+        for s in servers_list:
+            if not servers.is_bedrock(s):
+                continue
+            count += 1
+            runtime = self.app.server_manager.runtime(s)
+            snap = runtime.snapshot() if runtime else {}
+            state = snap.get("state") or "stopped"
+            address = "%s:%d" % (lan, int(s.get("port") or servers.BEDROCK_PORT))
+            self.tree.insert("", "end", iid=s["id"],
+                             values=(s.get("name", s["id"]), address, state.title()))
+        self.status.configure(text=("%d Bedrock server(s) found." % count) if count
+                              else "No Bedrock servers yet - create one in the Server hoster.")
+
+    def _selected_address(self):
+        sel = self.tree.selection()
+        if not sel:
+            return ""
+        values = self.tree.item(sel[0], "values")
+        return values[1] if len(values) > 1 else ""
+
+    def _copy_address(self):
+        address = self._selected_address()
+        if not address:
+            self.status.configure(text="Pick a Bedrock server in the list first.")
+            return
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(address)
+            self.status.configure(text="Copied %s - paste it in Bedrock > Play > Servers."
+                                  % address)
+        except tk.TclError:
+            pass
+
+    def _launch(self):
+        try:
+            bedrock.launch()
+            self.status.configure(text="Starting Bedrock Edition ...")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_NAME, str(exc), parent=self.win)
+
+    def _close(self):
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+        self.win = None
+
+
 class ServerHosterDialog:
     """XI Server Hoster: create and run Minecraft servers on this PC.
 
@@ -2149,7 +2325,7 @@ class ServerHosterDialog:
         ttk.Button(head, text="Servers folder", command=self._open_root).pack(
             side="right", padx=(0, 8))
 
-        ttk.Label(win, text="Create a Vanilla, Paper or Fabric server, start it, "
+        ttk.Label(win, text="Create a Vanilla, Paper, Fabric or Bedrock server, start it, "
                             "watch the console, invite friends and keep backups. "
                             "Unlike a cloud host, the server runs while this PC is on.",
                   style="Dim.TLabel", wraplength=880, justify="left").pack(
@@ -2162,12 +2338,12 @@ class ServerHosterDialog:
                                  show="headings", style="Mods.Treeview",
                                  selectmode="browse")
         for col, text, width, anchor in (
-                ("name", "SERVER", 230, "w"),
+                ("name", "SERVER", 210, "w"),
                 ("software", "SOFTWARE", 90, "w"),
-                ("version", "VERSION", 80, "w"),
+                ("version", "VERSION", 90, "w"),
                 ("state", "STATUS", 100, "w"),
                 ("players", "PLAYERS", 80, "center"),
-                ("address", "LAN ADDRESS", 170, "w")):
+                ("address", "ADDRESS", 180, "w")):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
         tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
@@ -2175,6 +2351,11 @@ class ServerHosterDialog:
         tsb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda _e: self._open_console())
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._show_detail())
+
+        self.detail = ttk.Label(win, text="Select a server to see its name and address.",
+                                style="Sub.TLabel", wraplength=900, justify="left")
+        self.detail.pack(anchor="w", padx=16, pady=(8, 0))
 
         acts = ttk.Frame(win, style="TFrame")
         acts.pack(fill="x", padx=16, pady=(10, 0))
@@ -2234,27 +2415,52 @@ class ServerHosterDialog:
                      "running": "Running", "stopping": "Stopping",
                      "stopped": "Stopped", "crashed": "Crashed"}.get(
                          state, state.title())
+            port = int(s.get("port") or (servers.BEDROCK_PORT if servers.is_bedrock(s)
+                                         else servers.DEFAULT_PORT))
             self.tree.insert("", "end", iid=s["id"], values=(
                 s.get("name", s["id"]), s.get("software", "Vanilla"),
                 s.get("version", ""), label, players,
-                "%s:%d" % (lan, int(s.get("port") or 25565))))
+                "%s:%d" % (lan, port)))
         if keep and self.tree.exists(keep):
             self.tree.selection_set(keep)
         self.status.configure(text="%d server%s  ·  %d running  ·  %s" % (
             len(self.servers), "" if len(self.servers) == 1 else "s", running,
             "Runs locally while this PC is on." if self.servers
             else "No servers yet - press New server to create one."))
+        self._show_detail()
 
     # ---------------------------------------------------------------- helpers
-    def _selected(self):
+    def _current(self):
         selection = self.tree.selection()
         if not selection:
-            messagebox.showinfo(APP_NAME, "Pick a server first.", parent=self.win)
             return None
         for s in self.servers:
             if s["id"] == selection[0]:
                 return s
         return None
+
+    def _selected(self):
+        server = self._current()
+        if not server:
+            messagebox.showinfo(APP_NAME, "Pick a server first.", parent=self.win)
+            return None
+        return server
+
+    def _show_detail(self):
+        server = self._current()
+        if not server:
+            self.detail.configure(text="Select a server to see its name and address.")
+            return
+        is_bedrock = servers.is_bedrock(server)
+        port = int(server.get("port") or (servers.BEDROCK_PORT if is_bedrock
+                                          else servers.DEFAULT_PORT))
+        lan = servers.lan_ip()
+        kind = "Bedrock · UDP" if is_bedrock else "Java Edition · TCP"
+        self.detail.configure(text="%s  ·  %s %s  ·  %s  ·  address  %s:%d"
+                                   "   (this PC: 127.0.0.1:%d)" % (
+                                       server.get("name", server["id"]),
+                                       server.get("software", "Vanilla"),
+                                       server.get("version", ""), kind, lan, port, port))
 
     def _run_bg(self, work, done=None, label=""):
         if label:
@@ -2399,9 +2605,25 @@ class ServerHosterDialog:
         self.win.after(1000, lambda: self._wait_then_join(server, deadline))
 
     def _launch_join(self, server):
-        address = "127.0.0.1:%d" % int(server.get("port") or 25565)
-        self.status.configure(text="Launching Minecraft and joining %s ..." % address)
-        self.app.play_server(address)
+        is_bedrock = servers.is_bedrock(server)
+        port = int(server.get("port") or (servers.BEDROCK_PORT if is_bedrock
+                                          else servers.DEFAULT_PORT))
+        lan_address = "%s:%d" % (servers.lan_ip(), port)
+        local_address = "127.0.0.1:%d" % port
+        if is_bedrock:
+            self.status.configure(text="Starting Bedrock Edition - join %s" % local_address)
+            self.app.launch_bedrock(local_address, status=self.status)
+            messagebox.showinfo(
+                APP_NAME,
+                "'%s' is running.\n\nBedrock address: %s\n(on this PC: %s)\n\n"
+                "Bedrock Edition has no command line to auto-join, so open Bedrock, "
+                "go to Play > Servers > Add Server and paste the address.\n\n"
+                "Tip: copy the address from the Share window." % (
+                    server.get("name", "server"), lan_address, local_address),
+                parent=self.win)
+            return
+        self.status.configure(text="Launching Minecraft and joining %s ..." % local_address)
+        self.app.play_server(local_address)
 
     def _backup(self):
         s = self._selected()
@@ -2549,9 +2771,9 @@ class ServerCreateDialog:
         name.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 
         label(2, 0, "MINECRAFT VERSION")
-        ttk.Combobox(form, textvariable=self.version_var, values=versions,
-                     state="readonly", width=16).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self.version_box = ttk.Combobox(form, textvariable=self.version_var, values=versions,
+                                        state="readonly", width=16)
+        self.version_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         label(2, 2, "SOFTWARE")
         ttk.Combobox(form, textvariable=self.software_var,
                      values=list(servers.SOFTWARES), state="readonly", width=16).grid(
@@ -2590,11 +2812,34 @@ class ServerCreateDialog:
                         variable=self.eula_var).grid(
             row=11, column=0, columnspan=4, sticky="w")
 
-        ttk.Label(form, text="Vanilla needs no extra setup. Paper adds plugins and better "
-                             "performance. Fabric runs Fabric mods. The first start also "
-                             "downloads a matching Java runtime if needed.",
+        self.hint_var = tk.StringVar()
+        ttk.Label(form, textvariable=self.hint_var,
                   style="PanelDim.TLabel", wraplength=540, justify="left").grid(
             row=12, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+        def on_software(*_args):
+            if self.software_var.get().lower() == "bedrock":
+                self.port_var.set(str(servers.next_free_bedrock_port()))
+                try:
+                    self.version_box.configure(state="disabled")
+                except tk.TclError:
+                    pass
+                self.hint_var.set("Bedrock runs the official Bedrock Dedicated Server for "
+                                  "Windows (a native program, no Java needed). It is always "
+                                  "Microsoft's current Bedrock release, and players join "
+                                  "from Bedrock Edition on any device (phone, console, PC).")
+            else:
+                self.port_var.set(str(servers.next_free_port()))
+                try:
+                    self.version_box.configure(state="readonly")
+                except tk.TclError:
+                    pass
+                self.hint_var.set("Vanilla needs no extra setup. Paper adds plugins and "
+                                  "better performance. Fabric runs Fabric mods. The first "
+                                  "start also downloads a matching Java runtime if needed.")
+
+        self.software_var.trace_add("write", on_software)
+        on_software()
 
         self.progress = ttk.Progressbar(win, mode="indeterminate")
         self.progress.pack(fill="x", padx=16, pady=(10, 0))
@@ -2630,7 +2875,11 @@ class ServerCreateDialog:
             messagebox.showinfo(APP_NAME, "Port, memory and player limit must be numbers.",
                                 parent=self.win)
             return
-        if not servers.port_free(port):
+        if self.software_var.get().lower() == "bedrock":
+            port_ok = servers.bedrock_port_free(port)
+        else:
+            port_ok = servers.port_free(port)
+        if not port_ok:
             messagebox.showinfo(APP_NAME, "Port %d is already in use. Try another one." % port,
                                 parent=self.win)
             return
@@ -2773,12 +3022,22 @@ class ServerConsoleDialog:
             self.server)).pack(side="left")
         ttk.Button(row, text="Stop", command=lambda: self.hoster._stop_server(
             self.server)).pack(side="left", padx=(6, 0))
-        ttk.Button(row, text="Save world", command=lambda: self._quick("save-all")).pack(
-            side="left", padx=(6, 0))
-        ttk.Button(row, text="List players", command=lambda: self._quick("list")).pack(
-            side="left", padx=(6, 0))
-        ttk.Button(row, text="Say hello", command=lambda: self._quick("say Hello!")).pack(
-            side="left", padx=(6, 0))
+        if servers.is_bedrock(self.server):
+            # Bedrock's dedicated server has its own command set: no last-arg
+            # "save-all" and no "list"/"say".
+            ttk.Button(row, text="Save world",
+                       command=lambda: self._quick("save hold")).pack(
+                side="left", padx=(6, 0))
+            ttk.Button(row, text="Allow list",
+                       command=lambda: self._quick("allowlist list")).pack(
+                side="left", padx=(6, 0))
+        else:
+            ttk.Button(row, text="Save world", command=lambda: self._quick("save-all")).pack(
+                side="left", padx=(6, 0))
+            ttk.Button(row, text="List players", command=lambda: self._quick("list")).pack(
+                side="left", padx=(6, 0))
+            ttk.Button(row, text="Say hello", command=lambda: self._quick("say Hello!")).pack(
+                side="left", padx=(6, 0))
 
         cmd = ttk.Frame(win, style="TFrame")
         cmd.pack(fill="x", padx=14, pady=(8, 0))
@@ -2830,7 +3089,9 @@ class ServerConsoleDialog:
             state = {"starting": "Starting", "running": "Running",
                      "stopping": "Stopping", "stopped": "Stopped",
                      "crashed": "Crashed"}.get(snap.get("state"), snap.get("state", "?"))
-            address = "127.0.0.1:%d" % int(self.server.get("port") or 25565)
+            address = "127.0.0.1:%d" % int(self.server.get("port") or (
+                servers.BEDROCK_PORT if servers.is_bedrock(self.server)
+                else servers.DEFAULT_PORT))
             self.status.configure(text="%s  ·  %d/%d players  ·  %s" % (
                 state, snap.get("player_count", 0), snap.get("max_players", 0), address))
             if snap.get("error"):
@@ -2888,6 +3149,7 @@ class ServerOptionsDialog:
         self.app = hoster.app
         self.server = server
         self.win = None
+        self._bedrock = servers.is_bedrock(server)
 
     def show(self):
         s = self.server
@@ -2912,7 +3174,8 @@ class ServerOptionsDialog:
         self.motd_var = tk.StringVar(value=s.get("motd", ""))
         self.players_var = tk.StringVar(value=str(s.get("max_players", 10)))
         self.ram_var = tk.StringVar(value=str(s.get("ram_mb", 2048)))
-        self.port_var = tk.StringVar(value=str(s.get("port", 25565)))
+        self.port_var = tk.StringVar(value=str(s.get("port", (
+            servers.BEDROCK_PORT if self._bedrock else servers.DEFAULT_PORT))))
         self.difficulty_var = tk.StringVar(value=s.get("difficulty", "normal"))
         self.gamemode_var = tk.StringVar(value=s.get("gamemode", "survival"))
         self.online_var = tk.BooleanVar(value=bool(s.get("online_mode", True)))
@@ -2961,7 +3224,8 @@ class ServerOptionsDialog:
         try:
             players = max(1, min(100, int(float(self.players_var.get() or "10"))))
             ram = int(float(self.ram_var.get() or "2048"))
-            port = int(float(self.port_var.get() or "25565"))
+            port = int(float(self.port_var.get() or (
+                servers.BEDROCK_PORT if self._bedrock else servers.DEFAULT_PORT)))
         except ValueError:
             messagebox.showinfo(APP_NAME, "Players, memory and port must be numbers.",
                                 parent=self.win)
@@ -2972,10 +3236,13 @@ class ServerOptionsDialog:
             return
         runtime, _snap, _state = self.hoster._state(self.server)
         running = bool(runtime and runtime.alive())
-        if port != int(self.server.get("port") or 25565) and not servers.port_free(port):
-            messagebox.showinfo(APP_NAME, "Port %d is already in use." % port,
-                                parent=self.win)
-            return
+        if port != int(self.server.get("port") or 0):
+            port_ok = (servers.bedrock_port_free(port) if self._bedrock
+                       else servers.port_free(port))
+            if not port_ok:
+                messagebox.showinfo(APP_NAME, "Port %d is already in use." % port,
+                                    parent=self.win)
+                return
         self.server.update({
             "name": name,
             "motd": self.motd_var.get().strip()[:120] or "An XI Server",
@@ -3163,7 +3430,9 @@ class ServerShareDialog:
         self.win = None
         self.public_lbl = None
         self.status = None
-        self._port = int(server.get("port") or 25565)
+        self._bedrock = servers.is_bedrock(server)
+        self._port = int(server.get("port") or (servers.BEDROCK_PORT if self._bedrock
+                                                else servers.DEFAULT_PORT))
         self._lan = servers.lan_ip()
 
     def show(self):
@@ -3179,12 +3448,16 @@ class ServerShareDialog:
         head = ttk.Frame(win, style="TFrame")
         head.pack(fill="x", padx=16, pady=(14, 4))
         ttk.Label(head, text="SHARE THIS SERVER", style="Head.TLabel").pack(side="left")
+        ttk.Label(head, text="  %s  ·  %s" % (
+            self.server.get("name", "server"), self.server.get("software", "Vanilla")),
+            style="Sub.TLabel").pack(side="left", pady=(6, 0))
 
         panel = ttk.Frame(win, style="Panel.TFrame", padding=16)
         panel.pack(fill="both", expand=True, padx=16, pady=(8, 0))
         panel.columnconfigure(1, weight=1)
 
         rows = [
+            ("Server name", str(self.server.get("name", "server"))),
             ("On this PC", "127.0.0.1:%d" % self._port),
             ("Same Wi-Fi / LAN", "%s:%d" % (self._lan, self._port)),
         ]
@@ -3197,23 +3470,25 @@ class ServerShareDialog:
 
         ttk.Label(panel, text="INTERNET", style="PanelDim.TLabel",
                   font=("Segoe UI Semibold", 8)).grid(
-            row=2, column=0, sticky="w", padx=(0, 16), pady=(0, 10))
+            row=3, column=0, sticky="w", padx=(0, 16), pady=(0, 10))
         self.public_lbl = ttk.Label(panel, text="checking public IP ...",
                                     style="Panel.TLabel", font=("Consolas", 11))
-        self.public_lbl.grid(row=2, column=1, sticky="w", pady=(0, 10))
+        self.public_lbl.grid(row=3, column=1, sticky="w", pady=(0, 10))
 
+        proto = "UDP" if self._bedrock else "TCP"
         ttk.Label(panel, text="Friends on the same Wi-Fi can use the LAN address. For "
-                              "internet play, TCP port %d must be forwarded on the router "
+                              "internet play, %s port %d must be forwarded on the router "
                               "(or use UPnP below). The server only stays online while this "
-                              "PC and the launcher are running." % self._port,
+                              "PC and the launcher are running." % (proto, self._port),
                   style="PanelDim.TLabel", wraplength=500, justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(4, 8))
-        ttk.Label(panel, text="Online mode is %s. Friends must own Minecraft and use the "
-                              "same version (%s)." % (
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 8))
+        ttk.Label(panel, text="Online mode is %s. Friends must own Minecraft (%s) and use a "
+                              "matching version (%s)." % (
                                   "on" if self.server.get("online_mode", True) else "OFF",
+                                  "Bedrock Edition" if self._bedrock else "Java Edition",
                                   self.server.get("version", "")),
                   style="PanelDim.TLabel", wraplength=500, justify="left").grid(
-            row=4, column=0, columnspan=2, sticky="w")
+            row=5, column=0, columnspan=2, sticky="w")
 
         acts = ttk.Frame(win, style="TFrame")
         acts.pack(fill="x", padx=16, pady=(10, 0))

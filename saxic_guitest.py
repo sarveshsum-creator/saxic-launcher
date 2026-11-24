@@ -45,7 +45,7 @@ def main(argv=None):
     if "--dialogs" in argv:
         print("--- extra dialogs ---")
         for cls in (sl.WorldsDialog, sl.ScreenshotsDialog, sl.NewsDialog,
-                    sl.ServerHosterDialog):
+                    sl.ServerHosterDialog, sl.BedrockDialog):
             dlg = cls(app)
             dlg.show()
             for _ in range(15):
@@ -78,6 +78,18 @@ def main(argv=None):
             print("RESULT: GUI SMOKE FAILED (server form)")
             return 1
         create._close()
+        bedrock = sl.ServerCreateDialog(hoster)
+        bedrock.show()
+        bedrock.software_var.set("Bedrock")
+        root.update()
+        bport = bedrock.port_var.get()
+        print("ServerCreateDialog (Bedrock): port %s, version box %s" % (
+            bport, bedrock.version_box.cget("state")))
+        if not (bport.isdigit() and 19000 < int(bport) < 19300
+                and str(bedrock.version_box.cget("state")) == "disabled"):
+            print("RESULT: GUI SMOKE FAILED (bedrock form)")
+            return 1
+        bedrock._close()
         hoster._close()
         root.update()
 
