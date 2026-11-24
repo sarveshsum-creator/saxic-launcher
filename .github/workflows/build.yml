@@ -40,8 +40,8 @@ jobs:
         run: |
           gh release view latest 2>$null
           if ($LASTEXITCODE -ne 0) {
-            gh release create latest --title "XI Launcher (latest)" --notes "Automatic build of the current source. Download XI-Launcher.exe, or the share-ready zip, below." --latest
+            gh release create latest --title "XI Launcher (latest)" --notes "XI Launcher - an original Minecraft launcher and server hoster for Windows. Supports Java Edition and Bedrock Edition. Download XI-Launcher.exe, or the share-ready zip, below." --latest
           } else {
-            gh release edit latest --title "XI Launcher (latest)" --notes "Automatic build of the current source. Download XI-Launcher.exe, or the share-ready zip, below."
+            gh release edit latest --title "XI Launcher (latest)" --notes "XI Launcher - an original Minecraft launcher and server hoster for Windows. Supports Java Edition and Bedrock Edition. Download XI-Launcher.exe, or the share-ready zip, below."
           }
           gh release upload latest dist/XI-Launcher.exe dist/XI-Launcher.exe.sha256 dist/XI-Launcher-win64.zip dist/XI-Launcher-win64.zip.sha256 --clobber
