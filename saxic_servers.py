@@ -786,6 +786,7 @@ class ServerManager:
         self.game_dir = game_dir
         self.log = log
         self._runtimes: dict = {}
+        self._starting: set = set()
         self._lock = threading.Lock()
 
     def servers(self) -> list:
@@ -796,18 +797,27 @@ class ServerManager:
             return self._runtimes.get(server.get("id"))
 
     def start(self, server: dict) -> ServerProcess:
+        sid = server.get("id")
         with self._lock:
-            current = self._runtimes.get(server.get("id"))
-            if current and current.alive():
+            current = self._runtimes.get(sid)
+            # Another thread may be starting this same server right now, in
+            # which case ``current.popen`` is still None but the process is on
+            # its way. Without the ``_starting`` guard a second call would
+            # build a second ServerProcess and orphan the first one.
+            if current and (current.alive() or sid in self._starting):
                 return current
             runtime = ServerProcess(server, self.game_dir, log=self.log)
-            self._runtimes[server.get("id")] = runtime
+            self._runtimes[sid] = runtime
+            self._starting.add(sid)
         try:
             runtime.start()
         except Exception:
             with self._lock:
-                self._runtimes.pop(server.get("id"), None)
+                self._starting.discard(sid)
+                self._runtimes.pop(sid, None)
             raise
+        with self._lock:
+            self._starting.discard(sid)
         return runtime
 
     def stop(self, server: dict, timeout: float = 30.0) -> None:
@@ -821,7 +831,15 @@ class ServerManager:
 
     def remove(self, server: dict) -> None:
         self.stop(server, timeout=12)
-        shutil.rmtree(server["path"], ignore_errors=True)
+        path = server.get("path") or ""
+        # Windows can keep the folder locked for a moment after the process
+        # exits, so removed() retries instead of silently leaving it behind.
+        for _attempt in range(6):
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.isdir(path):
+                return
+            time.sleep(0.3)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

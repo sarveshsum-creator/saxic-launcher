@@ -319,6 +319,76 @@ def main(argv):
         fails += 0 if ok else 1
     _shutil.rmtree(here_self, ignore_errors=True)
 
+    # Server process + manager concurrency (stub process, no Java/BDS needed).
+    print("\n--- server process + manager concurrency ---")
+    import shutil as _sh2
+
+    stub_game = os.path.join(here_self, "stubgame")
+    _sh2.rmtree(stub_game, ignore_errors=True)
+    stub_path = os.path.join(srv.servers_root(stub_game), "stub")
+    os.makedirs(stub_path, exist_ok=True)
+    open(os.path.join(stub_path, srv.BEDROCK_EXE), "wb").write(b"stub")
+    stub = {
+        "id": "stub", "name": "Stub", "software": "Bedrock", "version": "1.0",
+        "ram_mb": 1024, "port": srv.next_free_port(19360, udp=True),
+        "online_mode": False, "motd": "stub", "max_players": 10,
+        "difficulty": "normal", "gamemode": "survival", "created": time.time(),
+        "last_started": 0, "eula_accepted": True, "jar": srv.BEDROCK_EXE,
+        "manager_version": srv.MANAGER_VERSION, "path": stub_path,
+    }
+    srv.write_eula(stub, True)
+    srv.apply_properties(stub)
+    srv.save_server(stub)
+
+    stub_src = ("import sys\n"
+                "print('Server started.', flush=True)\n"
+                "for line in sys.stdin:\n"
+                "    if line.strip() == 'stop':\n"
+                "        sys.exit(0)\n")
+    _real_command = srv.server_command
+    srv.server_command = lambda server, java: [sys.executable, "-u", "-c", stub_src]
+
+    def _wait(pred, timeout=8.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return True
+            time.sleep(0.02)
+        return False
+
+    mgr = srv.ServerManager(stub_game, log=lambda *a, **k: None)
+    got = []
+
+    def _go():
+        try:
+            got.append(mgr.start(stub))
+        except Exception as exc:  # noqa: BLE001
+            got.append(exc)
+
+    threads = [_threading.Thread(target=_go) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    first = next((g for g in got if not isinstance(g, Exception)), None)
+    started = bool(first) and _wait(lambda: first.alive())
+    same_runtime = len({id(g) for g in got}) == 1 and not any(
+        isinstance(g, Exception) for g in got)
+    mgr.remove(stub)
+    remove_ok = not os.path.isdir(stub_path)
+    srv.server_command = _real_command
+    _sh2.rmtree(stub_game, ignore_errors=True)
+
+    proc_checks = {
+        "stub server reaches running": started,
+        "concurrent starts share one runtime": same_runtime,
+        "remove stops it and deletes the folder": remove_ok,
+    }
+    for name, ok in proc_checks.items():
+        print(("PASS " if ok else "FAIL ") + name)
+        fails += 0 if ok else 1
+    _sh2.rmtree(here_self, ignore_errors=True)
+
     print("\n--- credits ---")
 
     def _is_date(value):
