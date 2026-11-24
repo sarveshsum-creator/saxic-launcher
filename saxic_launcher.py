@@ -2455,7 +2455,7 @@ class ServerHosterDialog:
         port = int(server.get("port") or (servers.BEDROCK_PORT if is_bedrock
                                           else servers.DEFAULT_PORT))
         lan = servers.lan_ip()
-        kind = "Bedrock · UDP" if is_bedrock else "Java Edition · TCP"
+        kind = "Bedrock · TCP+UDP" if is_bedrock else "Java Edition · TCP"
         self.detail.configure(text="%s  ·  %s %s  ·  %s  ·  address  %s:%d"
                                    "   (this PC: 127.0.0.1:%d)" % (
                                        server.get("name", server["id"]),
@@ -2855,6 +2855,11 @@ class ServerCreateDialog:
         self.create_btn.pack(side="right", padx=(0, 8))
         win.protocol("WM_DELETE_WINDOW", self._cancel)
 
+    def _cancel_check(self):
+        """Raise Cancelled when the user pressed Cancel (download/backup hook)."""
+        if self.cancel_event.is_set():
+            raise Cancelled()
+
     def _create(self):
         if self._creating:
             return
@@ -2900,7 +2905,7 @@ class ServerCreateDialog:
             eula=True,
             log=lambda text: self.app.q("log", "[server] " + text),
             progress=lambda done, total: self._progress.put((done, total)),
-            cancel=self.cancel_event)
+            cancel=self._cancel_check)
         game_dir = self.app.settings["game_dir"]
 
         def failed(error):
@@ -3475,7 +3480,7 @@ class ServerShareDialog:
                                     style="Panel.TLabel", font=("Consolas", 11))
         self.public_lbl.grid(row=3, column=1, sticky="w", pady=(0, 10))
 
-        proto = "UDP" if self._bedrock else "TCP"
+        proto = "TCP + UDP" if self._bedrock else "TCP"
         ttk.Label(panel, text="Friends on the same Wi-Fi can use the LAN address. For "
                               "internet play, %s port %d must be forwarded on the router "
                               "(or use UPnP below). The server only stays online while this "
@@ -3521,18 +3526,19 @@ class ServerShareDialog:
 
     def _upnp(self):
         self.status.configure(text="Asking the router for a port mapping ...")
+        protocols = ("TCP", "UDP") if self._bedrock else ("TCP",)
 
         def done(ok):
             if not self.win or not self.win.winfo_exists():
                 return
             self.status.configure(
-                text=("Router accepted the mapping. Try the internet address above."
+                text=("Router accepted the mapping(s). Try the internet address above."
                       if ok else
-                      "No automatic mapping. Forward TCP port %d to %s in the router "
+                      "No automatic mapping. Forward %s port %d to %s in the router "
                       "settings, or use a VPN such as Tailscale/ZeroTier." %
-                      (self._port, self._lan)))
+                      ("TCP + UDP" if self._bedrock else "TCP", self._port, self._lan)))
 
-        _background(self.win, lambda: servers.try_upnp(self._port, self._lan),
+        _background(self.win, lambda: servers.try_upnp(self._port, self._lan, protocols),
                     done, lambda exc: self.status.configure(text="UPnP failed: %s" % exc))
 
     def _close(self):

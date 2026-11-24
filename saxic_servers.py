@@ -33,7 +33,7 @@ from xml.etree import ElementTree
 
 import saxic_install as install
 from saxic_util import (BROWSER_USER_AGENT, Cancelled, data_dir, download, http_json,
-                        human_size, os_name)
+                        human_size, os_name, raise_if_cancelled)
 
 SOFTWARES = ("Vanilla", "Paper", "Fabric", "Bedrock")
 JAVA_SOFTWARES = ("Vanilla", "Paper", "Fabric")
@@ -1004,8 +1004,7 @@ def create_backup(server: dict, log=print, cancel=None) -> str:
     try:
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for base, dirs, files in os.walk(world):
-                if cancel:
-                    cancel()
+                raise_if_cancelled(cancel)
                 for name in files:
                     if name == "session.lock":
                         continue
@@ -1125,8 +1124,14 @@ def _wan_service(location: str):
     return None, None
 
 
-def try_upnp(port: int, local_ip: str, log=print) -> bool:
-    """Try to add a TCP port mapping on the router (UPnP IGD)."""
+def try_upnp(port: int, local_ip: str, protocols=("TCP",), log=print) -> bool:
+    """Try to add router port mappings (UPnP IGD) for the given protocols.
+
+    Java servers need TCP only; Bedrock's NetherNet transport needs TCP (the
+    signaling socket) and UDP (the negotiated gameplay traffic), so pass
+    ``protocols=("TCP", "UDP")`` for Bedrock.
+    """
+    wanted = [p.upper() for p in protocols] or ["TCP"]
     locations = _ssdp_locations()
     if not locations:
         log("UPnP: no router answered the discovery request")
@@ -1141,34 +1146,41 @@ def try_upnp(port: int, local_ip: str, log=print) -> bool:
             continue
         service = stype.split(":")[-2] if stype.count(":") >= 2 else "WANIPConnection"
         action = "urn:schemas-upnp-org:service:%s:1#AddPortMapping" % service
-        body = (
-            '<?xml version="1.0"?>'
-            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
-            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-            "<s:Body><u:AddPortMapping xmlns:u=\"urn:schemas-upnp-org:service:%s:1\">"
-            "<NewRemoteHost></NewRemoteHost>"
-            "<NewExternalPort>%d</NewExternalPort>"
-            "<NewProtocol>TCP</NewProtocol>"
-            "<NewInternalPort>%d</NewInternalPort>"
-            "<NewInternalClient>%s</NewInternalClient>"
-            "<NewEnabled>1</NewEnabled>"
-            "<NewPortMappingDescription>XI Server Hoster</NewPortMappingDescription>"
-            "<NewLeaseDuration>0</NewLeaseDuration>"
-            "</u:AddPortMapping></s:Body></s:Envelope>" % (service, int(port), int(port), local_ip)
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            control, data=body,
-            headers={"Content-Type": 'text/xml; charset="utf-8"',
-                     "SOAPAction": '"%s"' % action,
-                     "User-Agent": "XI-Server-Hoster/1.0"})
-        try:
-            with urllib.request.urlopen(request, timeout=6) as response:
-                if 200 <= response.status < 300:
-                    log("UPnP: router accepted TCP %d -> %s:%d" % (port, local_ip, port))
-                    return True
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            log("UPnP: router refused the mapping (HTTP %s: %s)" % (exc.code, detail[:200]))
-        except Exception as exc:  # noqa: BLE001
-            log("UPnP: %s" % exc)
+        mapped = []
+        for proto in wanted:
+            body = (
+                '<?xml version="1.0"?>'
+                '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+                's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+                "<s:Body><u:AddPortMapping xmlns:u=\"urn:schemas-upnp-org:service:%s:1\">"
+                "<NewRemoteHost></NewRemoteHost>"
+                "<NewExternalPort>%d</NewExternalPort>"
+                "<NewProtocol>%s</NewProtocol>"
+                "<NewInternalPort>%d</NewInternalPort>"
+                "<NewInternalClient>%s</NewInternalClient>"
+                "<NewEnabled>1</NewEnabled>"
+                "<NewPortMappingDescription>XI Server Hoster</NewPortMappingDescription>"
+                "<NewLeaseDuration>0</NewLeaseDuration>"
+                "</u:AddPortMapping></s:Body></s:Envelope>"
+                % (service, int(port), proto, int(port), local_ip)
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                control, data=body,
+                headers={"Content-Type": 'text/xml; charset="utf-8"',
+                         "SOAPAction": '"%s"' % action,
+                         "User-Agent": "XI-Server-Hoster/1.0"})
+            try:
+                with urllib.request.urlopen(request, timeout=6) as response:
+                    if 200 <= response.status < 300:
+                        log("UPnP: router accepted %s %d -> %s:%d"
+                            % (proto, port, local_ip, port))
+                        mapped.append(proto)
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                log("UPnP: router refused %s %d (HTTP %s: %s)"
+                    % (proto, port, exc.code, detail[:200]))
+            except Exception as exc:  # noqa: BLE001
+                log("UPnP: %s %d: %s" % (proto, port, exc))
+        if len(mapped) == len(wanted):
+            return True
     return False

@@ -80,6 +80,24 @@ class Cancelled(Exception):
     """Raised when the user aborts a long operation."""
 
 
+def raise_if_cancelled(cancel) -> None:
+    """Honour a cancellation check given either way.
+
+    Long operations accept a ``cancel`` that is normally a callable raising
+    :class:`Cancelled` when the user asked to stop. Some older callers hand in
+    a bare :class:`threading.Event` instead, so accept that too rather than
+    crashing with "'Event' object is not callable".
+    """
+    if cancel is None:
+        return
+    is_set = getattr(cancel, "is_set", None)
+    if callable(is_set):
+        if is_set():
+            raise Cancelled()
+        return
+    cancel()
+
+
 # --------------------------------------------------------------------------
 # platform
 
@@ -444,8 +462,7 @@ def download(url: str, dest: str, sha1: str | None = None, size: int | None = No
                     done = 0
                     with open(tmp, "wb") as out:
                         while True:
-                            if cancel:
-                                cancel()
+                            raise_if_cancelled(cancel)
                             chunk = r.read(1 << 16)
                             if not chunk:
                                 break

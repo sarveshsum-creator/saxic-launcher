@@ -276,6 +276,47 @@ def main(argv):
     for name, ok in bedrock_checks.items():
         print(("PASS " if ok else "FAIL ") + name)
         fails += 0 if ok else 1
+
+    # Cancellation wiring: the GUI passes a threading.Event in some places and
+    # a callable in others. download()/backups must accept both shapes instead
+    # of crashing with "'Event' object is not callable".
+    print("\n--- cancellation (Event vs callable) ---")
+    import inspect as _inspect
+    import threading as _threading
+
+    import saxic_launcher as _ui
+    from saxic_util import Cancelled as _Cancel
+    from saxic_util import download as _download
+    from saxic_util import raise_if_cancelled
+
+    def _raises_cancel(fn):
+        try:
+            fn()
+        except _Cancel:
+            return True
+        return False
+
+    set_event = _threading.Event()
+    set_event.set()
+
+    def _boom():
+        raise _Cancel()
+
+    cancel_checks = {
+        "cancel=None is a no-op": not _raises_cancel(lambda: raise_if_cancelled(None)),
+        "unset Event is a no-op": not _raises_cancel(
+            lambda: raise_if_cancelled(_threading.Event())),
+        "set Event raises Cancelled": _raises_cancel(
+            lambda: raise_if_cancelled(set_event)),
+        "cancel callable is honoured": _raises_cancel(
+            lambda: raise_if_cancelled(_boom)),
+        "download tolerates an Event": "raise_if_cancelled" in _inspect.getsource(_download),
+        "create dialog has a cancel hook": callable(
+            getattr(_ui.ServerCreateDialog, "_cancel_check", None)),
+    }
+    for name, ok in cancel_checks.items():
+        print(("PASS " if ok else "FAIL ") + name)
+        fails += 0 if ok else 1
     _shutil.rmtree(here_self, ignore_errors=True)
 
     print("\n--- credits ---")
